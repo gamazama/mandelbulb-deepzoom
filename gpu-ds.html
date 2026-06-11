@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>GPU double-single EFT test</title></head>
+<body><canvas id="c" width="8" height="1"></canvas>
+<script>
+/* Tests whether GPU f32 ERROR-FREE TRANSFORMS (twoSum, twoProd) — the primitives
+   double-single / dd arithmetic is built on — survive the driver's shader compiler.
+   Risk: ANGLE/D3D11 (and FMA contraction) can fuse/reorder `s-a` so the error term
+   collapses to 0, silently breaking extended precision. We compute on GPU, read back
+   (s,e) and (p,e2) as RGBA32F, and the node runner diffs them against a strict-f32
+   CPU oracle. window.runEftTest() returns {renderer, hasFloat, results:[...]}.       */
+window.runEftTest = function(){
+  const cvs=document.getElementById('c');
+  const gl=cvs.getContext('webgl2',{antialias:false});
+  if(!gl) return {error:'no webgl2'};
+  const dbg=gl.getExtension('WEBGL_debug_renderer_info');
+  const renderer=dbg?gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER);
+  const cbf=gl.getExtension('EXT_color_buffer_float');
+  if(!cbf) return {renderer, hasFloat:false, error:'no EXT_color_buffer_float'};
+
+  // 8 test pairs (a,b); chosen so f32 twoSum/twoProd error terms are nonzero
+  const PAIRS=[[1.0,1e-8],[1.0,5e-8],[1.0,1.0000001],[100.0,1e-5],
+               [3.0,1e-7],[1.0000001,1.0000001],[1e7,0.1],[16777216.0,1.0]];
+  const flat=new Float32Array(16); PAIRS.forEach((p,i)=>{flat[i*2]=p[0];flat[i*2+1]=p[1];});
+
+  const VS=`#version 300 es
+  in vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }`;
+  // highp + hand-written EFTs. We do NOT trust the compiler to keep them exact —
+  // that's exactly what we're measuring.
+  const FS=`#version 300 es
+  precision highp float;
+  uniform vec2 uPairs[8];
+  out vec4 o;
+  const float SPL=4097.0;                 // 2^12+1 splitter for f32 (24-bit mantissa)
+  void split(float a, out float hi, out float lo){ float c=SPL*a; hi=c-(c-a); lo=a-hi; }
+  void twoSum(float a,float b, out float s,out float e){ s=a+b; float v=s-a; e=(a-(s-v))+(b-v); }
+  void twoProd(float a,float b,out float p,out float e){ p=a*b; float ah,al,bh,bl; split(a,ah,al); split(b,bh,bl); e=((ah*bh-p)+ah*bl+al*bh)+al*bl; }
+  void main(){
+    int i=int(gl_FragCoord.x);
+    vec2 ab=uPairs[i];
+    float s,e,pp,ee; twoSum(ab.x,ab.y,s,e); twoProd(ab.x,ab.y,pp,ee);
+    o=vec4(s,e,pp,ee);
+  }`;
+  function mk(t,src){const sh=gl.createShader(t);gl.shaderSource(sh,src);gl.compileShader(sh);
+    if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(sh); return sh;}
+  const prog=gl.createProgram();
+  gl.attachShader(prog,mk(gl.VERTEX_SHADER,VS)); gl.attachShader(prog,mk(gl.FRAGMENT_SHADER,FS));
+  gl.linkProgram(prog); if(!gl.getProgramParameter(prog,gl.LINK_STATUS)) throw gl.getProgramInfoLog(prog);
+  gl.useProgram(prog);
+
+  // RGBA32F render target, 8x1
+  const tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,8,1,0,gl.RGBA,gl.FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  const fbo=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) return {renderer,hasFloat:true,error:'fbo incomplete'};
+
+  const quad=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,quad);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+  const lp=gl.getAttribLocation(prog,'p'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp,2,gl.FLOAT,false,0,0);
+  gl.uniform2fv(gl.getUniformLocation(prog,'uPairs'),flat);
+  gl.viewport(0,0,8,1); gl.drawArrays(gl.TRIANGLES,0,3);
+
+  const out=new Float32Array(8*4); gl.readPixels(0,0,8,1,gl.RGBA,gl.FLOAT,out);
+  const results=PAIRS.map((p,i)=>({a:p[0],b:p[1],s:out[i*4],e:out[i*4+1],p:out[i*4+2],e2:out[i*4+3]}));
+  return {renderer, hasFloat:true, results};
+};
+/* HDR-arithmetic survival test. HDR = vec2(mantissa f32, exponent f32-int),
+   value = m·2^e — GMT's deep-zoom representation (ported verbatim from
+   engine/fractal/shaders/fractalKernel.ts). Its add/mul use NO error-free
+   transforms (just exponent bookkeeping + plain f32 mantissa ops), so the
+   NVIDIA EFT collapse should not apply. We exercise mul/add/sub/chains at
+   exponents around 2^-166 (≈1e-50) and down to 2^-314, where plain f32 δ
+   would have underflowed to zero long ago. Node runner diffs vs f64 oracle. */
+window.runHdrTest = function(){
+  const cvs=document.getElementById('c');
+  const gl=cvs.getContext('webgl2',{antialias:false});
+  if(!gl) return {error:'no webgl2'};
+  const dbg=gl.getExtension('WEBGL_debug_renderer_info');
+  const renderer=dbg?gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER);
+  const cbf=gl.getExtension('EXT_color_buffer_float');
+  if(!cbf) return {renderer, hasFloat:false, error:'no EXT_color_buffer_float'};
+
+  // 8 cases, inputs as (m1,e1,m2,e2). Case semantics live in the shader switch;
+  // the node oracle mirrors them. Exponents chosen around/below the 1e-50 target.
+  const IN=[
+    [1.5,-83,  1.25,-84 ],   // 0: mul → ~5e-51
+    [1.5,-166, 1.75,-166],   // 1: add, same exponent, at ~1e-50
+    [1.5,-160, 1.9,-170 ],   // 2: add, exponent gap 10
+    [1.5,-150, 1.9,-200 ],   // 3: add, gap 50 (> the 40 cutoff → returns a)
+    [1.5,-166, 1.25,-166],   // 4: sub with mantissa cancellation → (1.0,-168)
+    [1.1,-150, 1.002,0  ],   // 5: 32-iter chain h = h*K + C  (δ-recurrence shape)
+    [1.3,-20,  0,0      ],   // 6: square 4× → ^16 → ~3e-95 (2^-314)
+    [1.5,-10,  1.25,-15 ],   // 7: hdrFromFloat/hdrToFloat round-trip at f32-safe magnitude
+  ];
+  const flat=new Float32Array(32); IN.forEach((p,i)=>{for(let k=0;k<4;k++)flat[i*4+k]=p[k];});
+
+  const VS=`#version 300 es
+  in vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }`;
+  const FS=`#version 300 es
+  precision highp float;
+  uniform vec4 uIn[8];
+  out vec4 o;
+  // ── HDR helpers, ported VERBATIM from GMT fractalKernel.ts ──
+  vec2 hdrFromFloat(float v) {
+    if (v == 0.0) return vec2(0.0, 0.0);
+    float e = floor(log2(abs(v)));
+    return vec2(v * exp2(-e), e);
+  }
+  float hdrToFloat(vec2 h) { return h.x * exp2(h.y); }
+  vec2 hdrReduce(vec2 h) {
+    if (h.x == 0.0) return vec2(0.0, 0.0);
+    float adj = floor(log2(abs(h.x)));
+    return vec2(h.x * exp2(-adj), h.y + adj);
+  }
+  vec2 hdrAdd(vec2 a, vec2 b) {
+    if (a.x == 0.0) return b;
+    if (b.x == 0.0) return a;
+    if (a.y >= b.y) {
+      float shift = b.y - a.y;
+      if (shift < -40.0) return a;
+      return hdrReduce(vec2(a.x + b.x * exp2(shift), a.y));
+    } else {
+      float shift = a.y - b.y;
+      if (shift < -40.0) return b;
+      return hdrReduce(vec2(b.x + a.x * exp2(shift), b.y));
+    }
+  }
+  vec2 hdrSub(vec2 a, vec2 b) { return hdrAdd(a, vec2(-b.x, b.y)); }
+  vec2 hdrMul(vec2 a, vec2 b) { return hdrReduce(vec2(a.x * b.x, a.y + b.y)); }
+  // ─────────────────────────────────────────────────────────────
+  void main(){
+    int i=int(gl_FragCoord.x);
+    vec2 a=uIn[i].xy, b=uIn[i].zw;
+    vec2 r;
+    if      (i==0) r=hdrMul(a,b);
+    else if (i==1) r=hdrAdd(a,b);
+    else if (i==2) r=hdrAdd(a,b);
+    else if (i==3) r=hdrAdd(a,b);
+    else if (i==4) r=hdrSub(a,b);
+    else if (i==5) { vec2 h=a, K=b, C=vec2(1.3,-170.0);
+                     for(int k=0;k<32;k++) h=hdrAdd(hdrMul(h,K),C); r=h; }
+    else if (i==6) { vec2 h=a; for(int k=0;k<4;k++) h=hdrMul(h,h); r=h; }
+    else           r=hdrFromFloat(hdrToFloat(a)*hdrToFloat(b));
+    o=vec4(r,0.0,0.0);
+  }`;
+  function mk(t,src){const sh=gl.createShader(t);gl.shaderSource(sh,src);gl.compileShader(sh);
+    if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(sh); return sh;}
+  const prog=gl.createProgram();
+  gl.attachShader(prog,mk(gl.VERTEX_SHADER,VS)); gl.attachShader(prog,mk(gl.FRAGMENT_SHADER,FS));
+  gl.linkProgram(prog); if(!gl.getProgramParameter(prog,gl.LINK_STATUS)) throw gl.getProgramInfoLog(prog);
+  gl.useProgram(prog);
+
+  const tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,8,1,0,gl.RGBA,gl.FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  const fbo=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) return {renderer,hasFloat:true,error:'fbo incomplete'};
+
+  const quad=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,quad);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+  const lp=gl.getAttribLocation(prog,'p'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp,2,gl.FLOAT,false,0,0);
+  gl.uniform4fv(gl.getUniformLocation(prog,'uIn'),flat);
+  gl.viewport(0,0,8,1); gl.drawArrays(gl.TRIANGLES,0,3);
+
+  const out=new Float32Array(8*4); gl.readPixels(0,0,8,1,gl.RGBA,gl.FLOAT,out);
+  const results=IN.map((p,i)=>({in:p, m:out[i*4], e:out[i*4+1]}));
+  return {renderer, hasFloat:true, results};
+};
+window.__ready=true;
+</script></body></html>

@@ -1,0 +1,19 @@
+{
+  "name": "mandelbulb-deepzoom",
+  "version": "1.0.0",
+  "description": "Real-time 3D Mandelbulb perturbation deep-zoom in WebGL2, certified to 1e-50 against an independent arbitrary-precision referee.",
+  "homepage": "https://github.com/gamazama/mandelbulb-deepzoom",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "verify": "node direct-check.test.mjs && node harness-dive.test.mjs && node gpu-kernel.test.mjs",
+    "direct-check": "node direct-check.test.mjs",
+    "dive": "node harness-dive.test.mjs",
+    "kernel": "node gpu-kernel.test.mjs",
+    "power-cert": "node power-cert.mjs",
+    "bla": "node bla.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.44.0"
+  }
+}

@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>GPU triplex perturbation kernel — skeleton + verification</title></head>
+<body><canvas id="c" width="16" height="8"></canvas>
+<script>
+'use strict';
+/* =============================================================================
+   gpu-kernel.html — THE GLSL KERNEL SKELETON for Mandelbulb perturbation deep zoom,
+   with per-primitive GPU verification entries. Driven by gpu-kernel.test.mjs
+   (same loop as gpu-eft.test.mjs: real GPU, headed Chrome, RGBA32F readback).
+   -----------------------------------------------------------------------------
+   KERNEL_CORE below is the deliverable: it implements, in WebGL2 GLSL,
+     • HDR scalar arithmetic (VERBATIM from GMT fractalKernel.ts — already
+       GPU-verified 8/8 on RTX 2070 by gpu-ds.html runHdrTest)
+     • new HDR helpers this kernel needs (mulF/divF/recip, exact-binomial
+       (1+u)^n−1, tiny-safe atan, sin/cos residuals)  → verified by runPrimsTest
+     • Hdr3 (vec3-of-HDR) + the §3 cancellation-free stableDelta
+       (triplex-perturbation-math.md, residual forms from precision-ladder)
+       → verified single-step by runStepTest
+     • the Δr + Δdr perturbed-DE recurrence (de-depth.test.mjs §8.1)
+       → verified in runStepTest + at depth in runOrbitTest
+     • the per-pixel orbit loop: orbit-texture fetch, Zhuoran conditional
+       rebase (NEVER periodic), escape test  → verified by runOrbitTest
+     • a march-loop STUB (compiles + runs; camera/step policy is Fable's build)
+       → compile+sanity by runMarchTest
+
+   LOCKED RULES obeyed here (FABLE_BRIEF §8, do not relitigate):
+     δ = HDR only (no EFTs / double-single — dead on NVIDIA);
+     residual stableDelta forms mandatory; conditional rebase only;
+     reference orbit carries V_k, R_k, R_k^{N-1}, R_k^N, DR_k.
+
+   ORBIT TEXTURE LAYOUT (RGBA32F, width = orbit length, height = 4):
+     row 0: (Vx, Vy, Vz, R)                          — reference point + radius
+     row 1: (sin Nθ, cos Nθ, sin Nφ, cos Nφ)         — OUTPUT-angle trig, precomputed
+     row 2: (R^N .m, R^N .e, R^{N-1} .m, R^{N-1} .e) — HDR pairs (R^8 under/overflows f32)
+     row 3: (DR .m, DR .e, 0, 0)                     — reference dr, HDR (overflows f32 fast)
+   ============================================================================= */
+
+const N_POWER = 8;
+
+/* ════════════════════════ KERNEL CORE (GLSL ES 3.00) ════════════════════════ */
+const KERNEL_CORE = `
+/* ──── HDR scalar (vec2: mantissa, exponent) — VERBATIM GMT fractalKernel.ts ──── */
+vec2 hdrFromFloat(float v) {
+  if (v == 0.0) return vec2(0.0, 0.0);
+  float e = floor(log2(abs(v)));
+  return vec2(v * exp2(-e), e);
+}
+float hdrToFloat(vec2 h) { return h.x * exp2(h.y); }
+vec2 hdrReduce(vec2 h) {
+  if (h.x == 0.0) return vec2(0.0, 0.0);
+  float adj = floor(log2(abs(h.x)));
+  return vec2(h.x * exp2(-adj), h.y + adj);
+}
+vec2 hdrAdd(vec2 a, vec2 b) {
+  if (a.x == 0.0) return b;
+  if (b.x == 0.0) return a;
+  if (a.y >= b.y) {
+    float shift = b.y - a.y;
+    if (shift < -40.0) return a;
+    return hdrReduce(vec2(a.x + b.x * exp2(shift), a.y));
+  } else {
+    float shift = a.y - b.y;
+    if (shift < -40.0) return b;
+    return hdrReduce(vec2(b.x + a.x * exp2(shift), b.y));
+  }
+}
+vec2 hdrSub(vec2 a, vec2 b) { return hdrAdd(a, vec2(-b.x, b.y)); }
+vec2 hdrMul(vec2 a, vec2 b) { return hdrReduce(vec2(a.x * b.x, a.y + b.y)); }
+
+/* ──── NEW helpers (this prep; GPU-verified by runPrimsTest) ──── */
+vec2 hdrMulF(vec2 h, float s) { return hdrReduce(vec2(h.x * s, h.y)); }
+vec2 hdrDivF(vec2 h, float s) { return hdrReduce(vec2(h.x / s, h.y)); }
+vec2 hdrRecip(vec2 h) { if (h.x == 0.0) return vec2(0.0, 0.0); return hdrReduce(vec2(1.0 / h.x, -h.y)); }
+
+/* (1+u)^8 − 1 = u·(8 + 28u + 56u² + 70u³ + 56u⁴ + 28u⁵ + 8u⁶ + u⁷)  — EXACT binomial
+   factorization, cancellation-free for the deep regime (|u|≪1 → poly ≈ 8, all error
+   in an O(1) f32 factor). u may underflow f32 entirely: uf→0 gives 8·u exactly (correct
+   limit). Replaces the expm1/log1p route — no transcendental ports needed. */
+vec2 hdrPowm1_8(vec2 u) {
+  float uf = hdrToFloat(u);
+  float p = 8.0 + uf*(28.0 + uf*(56.0 + uf*(70.0 + uf*(56.0 + uf*(28.0 + uf*(8.0 + uf))))));
+  return hdrMulF(u, p);
+}
+/* (1+u)^7 − 1 = u·(7 + 21u + 35u² + 35u³ + 21u⁴ + 7u⁵ + u⁶) — for the Δdr recurrence */
+vec2 hdrPowm1_7(vec2 u) {
+  float uf = hdrToFloat(u);
+  float p = 7.0 + uf*(21.0 + uf*(35.0 + uf*(35.0 + uf*(21.0 + uf*(7.0 + uf)))));
+  return hdrMulF(u, p);
+}
+/* atan2(num, den) where num is HDR (possibly far below f32 underflow) and den is O(1) f32.
+   Series path covers |num/den| ≤ 0.1: atan(x) = x·(1 − x²/3 + x⁴/5 − x⁶/7), rel err ~x⁸/9
+   ≤ 1e-9; the f32 factor → 1 exactly when x underflows. The builtin atan() is used only
+   above 0.1 (near-rebase / shallow regime) — measured rel err ~1e-4 on ANGLE d3d11, which
+   is why the series threshold is this high. */
+vec2 hdrAtanTiny(vec2 num, float den) {
+  float r = hdrToFloat(num) / den;
+  if (abs(r) > 0.1) return hdrFromFloat(atan(hdrToFloat(num), den));
+  float r2 = r * r;
+  return hdrMulF(hdrDivF(num, den), 1.0 - r2 * (0.33333333 - r2 * (0.2 - r2 * 0.14285714)));
+}
+/* sin(x) and cos(x)−1 for HDR x. Series path covers |x| ≤ 0.1 (worst rel err ~x⁶/5040);
+   float path uses the MANDATORY residual form cos(x)−1 = −sin²x/(1+cos x)
+   (precision-ladder.test.mjs — plain cos(x)-1.0 cancels catastrophically).
+   x may underflow f32: factor → 1, s = x, cm1 = −x²/2 (exact limits; x² stays HDR). */
+void hdrSinCosm1(vec2 x, out vec2 s, out vec2 cm1) {
+  float xf = hdrToFloat(x);
+  if (abs(xf) > 0.1) {
+    float sx = sin(xf), cx = cos(xf);
+    s = hdrFromFloat(sx);
+    cm1 = hdrFromFloat(-sx * sx / (1.0 + cx));
+  } else {
+    float x2 = xf * xf;
+    s = hdrMulF(x, 1.0 - x2 * 0.16666667 + x2 * x2 * 0.0083333333);
+    cm1 = hdrMulF(hdrMul(x, x), -0.5 * (1.0 - x2 * 0.083333333 + x2 * x2 * 0.0027777778));
+  }
+}
+
+/* ──── Hdr3: vec3 carried as three independent HDR scalars ──── */
+struct Hdr3 { vec2 x; vec2 y; vec2 z; };
+Hdr3 h3Zero() { return Hdr3(vec2(0.0), vec2(0.0), vec2(0.0)); }
+Hdr3 h3FromVec3(vec3 v) { return Hdr3(hdrFromFloat(v.x), hdrFromFloat(v.y), hdrFromFloat(v.z)); }
+vec3 h3ToVec3(Hdr3 h) { return vec3(hdrToFloat(h.x), hdrToFloat(h.y), hdrToFloat(h.z)); }
+Hdr3 h3Add(Hdr3 a, Hdr3 b) { return Hdr3(hdrAdd(a.x, b.x), hdrAdd(a.y, b.y), hdrAdd(a.z, b.z)); }
+/* dot(f32 vec3, Hdr3) → HDR */
+vec2 h3DotF(vec3 a, Hdr3 b) {
+  return hdrAdd(hdrAdd(hdrMulF(b.x, a.x), hdrMulF(b.y, a.y)), hdrMulF(b.z, a.z));
+}
+/* dot(Hdr3, Hdr3) → HDR */
+vec2 h3Dot(Hdr3 a, Hdr3 b) {
+  return hdrAdd(hdrAdd(hdrMul(a.x, b.x), hdrMul(a.y, b.y)), hdrMul(a.z, b.z));
+}
+
+/* ──── reference-orbit texture fetch (layout in the header comment) ──── */
+struct RefIter { vec3 V; float R; float sa; float ca; float sb; float cb; vec2 Rn; vec2 Rp; vec2 DR; };
+RefIter fetchRef(sampler2D orbit, int i) {
+  vec4 t0 = texelFetch(orbit, ivec2(i, 0), 0);
+  vec4 t1 = texelFetch(orbit, ivec2(i, 1), 0);
+  vec4 t2 = texelFetch(orbit, ivec2(i, 2), 0);
+  vec4 t3 = texelFetch(orbit, ivec2(i, 3), 0);
+  return RefIter(t0.xyz, t0.w, t1.x, t1.y, t1.z, t1.w, t2.xy, t2.zw, t3.xy);
+}
+
+/* ──── ONE perturbation step at reference iteration k ────
+   In:  rf = reference quantities at index k; d = δ_k (Hdr3); Ddr = Δdr_k (HDR, inout).
+   Out: .delta = Δ = P(V+δ)−P(V) (caller adds δc); .Dr = Δr_k = |V+δ|−R (HDR);
+        Ddr advanced to Δdr_{k+1}.
+   Math: triplex-perturbation-math.md §3 (exact, cancellation-free) with the MANDATORY
+   residual forms (precision-ladder.test.mjs) + the §8.1 Δdr derivative-delta
+   (de-depth.test.mjs). All O(δ) quantities in HDR; all O(1) reference math in f32. */
+struct StepOut { Hdr3 delta; vec2 Dr; };
+StepOut pertStep(RefIter rf, Hdr3 d, inout vec2 Ddr) {
+  vec3 V = rf.V; float R = rf.R;
+  vec3 df = h3ToVec3(d);                              // underflows to 0 at depth — only used at O(1) scale
+  /* §3a stable radius delta:  q = 2·V·δ + |δ|²,  Δr = q/(r₂+R)  (rationalised — no cancellation) */
+  vec2 q = hdrAdd(hdrMulF(h3DotF(V, d), 2.0), h3Dot(d, d));
+  float r2f = sqrt(max(R * R + hdrToFloat(q), 0.0));
+  vec2 Dr = hdrDivF(q, r2f + R);
+  /* §3b radial-power delta:  Δ(r^N) = R^N · ((1+u)^N − 1),  u = Δr/R  (exact binomial) */
+  vec2 u = hdrDivF(Dr, R);
+  vec2 dRn = hdrMul(rf.Rn, hdrPowm1_8(u));
+  /* §8.1 DE derivative-delta:  Δp = R^{N-1}·((1+u)^{N-1} − 1);
+     Δdr_{k+1} = N·( Δp·DR_k + (R^{N-1}+Δp)·Δdr_k )   — all HDR, no cancellation */
+  vec2 Dp = hdrMul(rf.Rp, hdrPowm1_7(u));
+  Ddr = hdrMulF(hdrAdd(hdrMul(Dp, rf.DR), hdrMul(hdrAdd(rf.Rp, Dp), Ddr)), 8.0);
+  /* §3c stable angle deltas. Dphi numerator in the RESIDUAL form V0·d1 − V1·d0
+     (exactly equal to V0(V1+d1)−V1(V0+d0); the parenthesised form cancels at ~1e-6 in f32). */
+  vec2 nphi = hdrSub(hdrMulF(d.y, V.x), hdrMulF(d.x, V.y));
+  float denPhi = V.x * (V.x + df.x) + V.y * (V.y + df.y);
+  vec2 Dphi = hdrAtanTiny(nphi, denPhi);
+  float rho = length(V.xy);
+  /* §3c EXACT polar-angle delta (2026-06-10 fix; was first-order — the O(δ²) seed
+     chaos-amplifies to O(δ) over near-critical 30-90-iter orbits and flips escape
+     bands; found by direct-f64 cross-check in harness direct-check.test.mjs):
+       Δθ = atan2(dρ·Vz − ρ·dz, ρρ′ + Vz(Vz+dz)),  dρ = qρ/(ρ′+ρ),
+       qρ = 2(Vx·dx + Vy·dy) + dx² + dy²   (cancellation-free, same trick as Δφ) */
+  vec2 qr = hdrAdd(hdrMulF(hdrAdd(hdrMulF(d.x, V.x), hdrMulF(d.y, V.y)), 2.0),
+                   hdrAdd(hdrMul(d.x, d.x), hdrMul(d.y, d.y)));
+  float rhoP = sqrt(max(rho * rho + hdrToFloat(qr), 0.0));
+  vec2 drho = hdrDivF(qr, rhoP + rho);
+  vec2 nth = hdrSub(hdrMulF(drho, V.z), hdrMulF(d.z, rho));
+  float denTh = rho * rhoP + V.z * (V.z + df.z);
+  vec2 Dth = hdrAtanTiny(nth, denTh);
+  /* §3d/§3e output-angle residuals: Δa = NΔθ, Δb = NΔφ; ds/dc via angle-addition residuals */
+  vec2 Da = hdrMulF(Dth, 8.0), Db = hdrMulF(Dphi, 8.0);
+  vec2 sA, cAm, sB, cBm;
+  hdrSinCosm1(Da, sA, cAm);
+  hdrSinCosm1(Db, sB, cBm);
+  float sa = rf.sa, ca = rf.ca, sb = rf.sb, cb = rf.cb;
+  vec2 dsA = hdrAdd(hdrMulF(cAm, sa), hdrMulF(sA, ca));   // sin(a+Δa)−sin a
+  vec2 dcA = hdrSub(hdrMulF(cAm, ca), hdrMulF(sA, sa));   // cos(a+Δa)−cos a
+  vec2 dsB = hdrAdd(hdrMulF(cBm, sb), hdrMulF(sB, cb));
+  vec2 dcB = hdrSub(hdrMulF(cBm, cb), hdrMulF(sB, sb));
+  /* ΔD per component, then §3f assemble  Δ = R^N·ΔD + Δ(r^N)·(D_ref + ΔD) */
+  Hdr3 DD = Hdr3(
+    hdrAdd(hdrAdd(hdrMulF(dcB, sa), hdrMulF(dsA, cb)), hdrMul(dsA, dcB)),
+    hdrAdd(hdrAdd(hdrMulF(dsB, sa), hdrMulF(dsA, sb)), hdrMul(dsA, dsB)),
+    dcA);
+  vec3 Dref = vec3(sa * cb, sa * sb, ca);
+  Hdr3 delta = Hdr3(
+    hdrAdd(hdrMul(rf.Rn, DD.x), hdrMul(dRn, hdrAdd(hdrFromFloat(Dref.x), DD.x))),
+    hdrAdd(hdrMul(rf.Rn, DD.y), hdrMul(dRn, hdrAdd(hdrFromFloat(Dref.y), DD.y))),
+    hdrAdd(hdrMul(rf.Rn, DD.z), hdrMul(dRn, hdrAdd(hdrFromFloat(Dref.z), DD.z))));
+  return StepOut(delta, Dr);
+}
+
+/* ──── full perturbed orbit for one pixel point  c_pixel = C_ref + δc ────
+   Mandelbulb convention (GMT formula_Mandelbulb): v_0 = c, so δ_0 = δc.
+   Zhuoran CONDITIONAL rebase only (|V+δ|² < |δ|² ∨ ref exhausted) — forced/periodic
+   rebasing is poison (precision-ladder PART 3 Result A). NO small-R forced rebase:
+   glitch-relocate.test.mjs (§8.5) showed an absolute R<0.05 guard re-anchors every
+   near-axis dip pass and DESTROYS near-axis views, while the §3 formulas ride
+   through dips fine (conditioning ~ pixel-offset/axis-distance).
+   On rebase, Δdr re-anchors too: the pixel's dr is unchanged but the new reference
+   index 0 has DR_0 = 1, so Δdr ← (DR_m − 1) + Δdr  [verified: escape-bailout.test.mjs]. */
+struct OrbitOut { Hdr3 d; vec2 Dr; vec2 Ddr; vec2 de; int iters; int rebases; bool escaped; };
+OrbitOut pertOrbit(sampler2D orbit, int orbitLen, Hdr3 dc, int maxIter) {
+  Hdr3 d = dc;
+  vec2 Ddr = vec2(0.0);
+  int m = 0, rebases = 0, it = 0;
+  bool escaped = false;
+  for (int k = 0; k < 512; k++) {
+    if (k >= maxIter) break;
+    RefIter rf = fetchRef(orbit, m);
+    StepOut so = pertStep(rf, d, Ddr);
+    d = h3Add(so.delta, dc);
+    m++;
+    it = k + 1;
+    RefIter rn = fetchRef(orbit, m);
+    vec3 df = h3ToVec3(d);                 // underflow → 0 at depth: both tests below stay correct
+    vec3 zf = rn.V + df;
+    if (dot(zf, zf) > 4.0) { escaped = true; break; }
+    if (dot(zf, zf) < dot(df, df) || m >= orbitLen - 1) {
+      d = h3FromVec3(zf - fetchRef(orbit, 0).V);
+      Ddr = hdrAdd(hdrSub(rn.DR, vec2(1.0, 0.0)), Ddr);
+      m = 0; rebases++;
+    }
+  }
+  /* final Δr vs the CURRENT reference index, then r = R+Δr, dr = DR+Δdr,
+     de = 0.5·r·ln(r)/dr  — dr stays HDR (it overflows f32), so de is HDR */
+  RefIter rf = fetchRef(orbit, m);
+  vec2 q = hdrAdd(hdrMulF(h3DotF(rf.V, d), 2.0), h3Dot(d, d));
+  float r2f = sqrt(max(rf.R * rf.R + hdrToFloat(q), 0.0));
+  vec2 Dr = hdrDivF(q, r2f + rf.R);
+  vec2 drH = hdrAdd(rf.DR, Ddr);
+  float rF = max(r2f, 1e-12);
+  vec2 de = hdrMul(hdrFromFloat(0.5 * rF * log(rF)), hdrRecip(drH));
+  return OrbitOut(d, Dr, Ddr, de, it, rebases, escaped);
+}
+`;
+
+/* ════════════════════════ GL plumbing (template from gpu-ds.html) ════════════════════════ */
+let _gl = null, _renderer = '';
+function glSetup() {
+  if (_gl) return { gl: _gl, renderer: _renderer };
+  const cvs = document.getElementById('c');
+  const gl = cvs.getContext('webgl2', { antialias: false });
+  if (!gl) return { error: 'no webgl2' };
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  _renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  if (!gl.getExtension('EXT_color_buffer_float')) return { error: 'no EXT_color_buffer_float' };
+  _gl = gl;
+  return { gl, renderer: _renderer };
+}
+const VS = `#version 300 es
+in vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }`;
+function buildProg(gl, fsBody) {
+  const FS = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+${KERNEL_CORE}
+${fsBody}`;
+  function mk(t, src) {
+    const sh = gl.createShader(t); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    return sh;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, mk(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  return prog;
+}
+function drawAndRead(gl, prog, W, H, bind) {
+  gl.useProgram(prog);
+  const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, W, H, 0, gl.RGBA, gl.FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  const fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('fbo incomplete');
+  const quad = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const lp = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp, 2, gl.FLOAT, false, 0, 0);
+  if (bind) bind(gl, prog);
+  gl.viewport(0, 0, W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const out = new Float32Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.FLOAT, out);
+  gl.deleteFramebuffer(fbo); gl.deleteTexture(tex); gl.deleteBuffer(quad);
+  return out;
+}
+function uploadOrbitTexture(gl, data, len) {
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, len, 4, 0, gl.RGBA, gl.FLOAT, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+
+/* ════════════════════════ JS-side orbit build (f64) ════════════════════════ */
+const N = N_POWER;
+const Pf = (v) => {
+  const r = Math.hypot(...v); if (r === 0) return [0, 0, 0];
+  const th = Math.acos(Math.max(-1, Math.min(1, v[2] / r))) * N, ph = Math.atan2(v[1], v[0]) * N, zr = Math.pow(r, N);
+  return [zr * Math.sin(th) * Math.cos(ph), zr * Math.sin(ph) * Math.sin(th), zr * Math.cos(th)];
+};
+const addv = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+function hdrSplit(v) {
+  if (v === 0 || !isFinite(v)) return { m: 0, e: 0 };
+  const e = Math.floor(Math.log2(Math.abs(v)));
+  return { m: Math.fround(v * Math.pow(2, -e)), e };
+}
+/* builds the texture data + f64 metadata (returned to node for oracle computation) */
+function buildOrbit(C, len) {
+  const V = [C.slice()];
+  for (let k = 0; k < len - 1; k++) V.push(addv(Pf(V[k]), C));
+  const data = new Float32Array(len * 4 * 4);
+  let DR = 1;
+  const Rk = [], DRk = [];
+  for (let k = 0; k < len; k++) {
+    const v = V[k], R = Math.hypot(...v);
+    const th = Math.acos(Math.max(-1, Math.min(1, v[2] / R))), ph = Math.atan2(v[1], v[0]);
+    const a = N * th, b = N * ph;
+    const Rn = Math.pow(R, N), Rp = Math.pow(R, N - 1);
+    const hRn = hdrSplit(Rn), hRp = hdrSplit(Rp), hDR = hdrSplit(DR);
+    const put = (row, vals) => { for (let j = 0; j < 4; j++) data[(row * len + k) * 4 + j] = vals[j]; };
+    put(0, [v[0], v[1], v[2], R]);
+    put(1, [Math.sin(a), Math.cos(a), Math.sin(b), Math.cos(b)]);
+    put(2, [hRn.m, hRn.e, hRp.m, hRp.e]);
+    put(3, [hDR.m, hDR.e, 0, 0]);
+    Rk.push(R); DRk.push(DR);
+    DR = N * Rp * DR + 1;
+  }
+  return { data, len, V, Rk, DRk };
+}
+
+/* the two validated CPU test centers (groundtruth / precision-ladder / de-depth) */
+const CENTERS = [[0.30, 0.50, 0.20], [0.90, 0.0, 0.10]];
+
+/* ════════════════════════ TEST 1: primitive helpers ════════════════════════ */
+window.runPrimsTest = function () {
+  const s = glSetup(); if (s.error) return { error: s.error };
+  const gl = s.gl;
+  // (value-as-HDR a, scalar b) per case; semantics in the shader switch, oracle in node
+  const CASES = [
+    { name: 'mulF tiny',       a: 3.7e-25, b: 1.7 },
+    { name: 'divF tiny',       a: 3.7e-25, b: 1.7 },
+    { name: 'recip',           a: 2.9e-30, b: 0 },
+    { name: 'powm1_8 u=1e-20', a: 1e-20,   b: 0 },
+    { name: 'powm1_8 u=1e-3',  a: 1e-3,    b: 0 },
+    { name: 'powm1_8 u=-0.3',  a: -0.3,    b: 0 },
+    { name: 'powm1_7 u=1e-20', a: 1e-20,   b: 0 },
+    { name: 'atanT tiny',      a: 2.4e-30, b: 0.85 },
+    { name: 'atanT series.01', a: 8.5e-3,  b: 0.85 },
+    { name: 'atanT series.09', a: 7.6e-2,  b: 0.85 },
+    { name: 'atanT builtin.3', a: 0.255,   b: 0.85 },
+    { name: 'sin x=1e-25',     a: 1e-25,   b: 0 },
+    { name: 'cosm1 x=1e-25',   a: 1e-25,   b: 0 },
+    { name: 'sin x=0.05',      a: 0.05,    b: 0 },
+    { name: 'cosm1 x=0.05',    a: 0.05,    b: 0 },
+    { name: 'sin x=0.5',       a: 0.5,     b: 0 },
+    { name: 'cosm1 x=0.5',     a: 0.5,     b: 0 },
+    { name: 'mulF negative',   a: 2e-40,   b: -3.5 },
+  ];
+  const flat = new Float32Array(CASES.length * 4);
+  CASES.forEach((c, i) => {
+    const h = hdrSplit(c.a);
+    flat[i * 4] = h.m; flat[i * 4 + 1] = h.e; flat[i * 4 + 2] = c.b; flat[i * 4 + 3] = 0;
+  });
+  const FS = `
+uniform vec4 uA[18];
+out vec4 o;
+void main(){
+  int i = int(gl_FragCoord.x);
+  vec2 a = uA[i].xy; float bf = uA[i].z;
+  vec2 r = vec2(0.0);
+  if      (i == 0)  r = hdrMulF(a, bf);
+  else if (i == 1)  r = hdrDivF(a, bf);
+  else if (i == 2)  r = hdrRecip(a);
+  else if (i >= 3 && i <= 5) r = hdrPowm1_8(a);
+  else if (i == 6)  r = hdrPowm1_7(a);
+  else if (i >= 7 && i <= 10) r = hdrAtanTiny(a, bf);
+  else if (i == 11 || i == 13 || i == 15) { vec2 sx, cm; hdrSinCosm1(a, sx, cm); r = sx; }
+  else if (i == 12 || i == 14 || i == 16) { vec2 sx, cm; hdrSinCosm1(a, sx, cm); r = cm; }
+  else r = hdrMulF(a, bf);
+  o = vec4(r, 0.0, 0.0);
+}`;
+  try {
+    const prog = buildProg(gl, FS);
+    const out = drawAndRead(gl, prog, CASES.length, 1, (gl, p) => {
+      gl.uniform4fv(gl.getUniformLocation(p, 'uA'), flat);
+    });
+    const results = CASES.map((c, i) => ({ name: c.name, a: c.a, b: c.b, m: out[i * 4], e: out[i * 4 + 1] }));
+    return { renderer: _renderer, results };
+  } catch (e) { return { renderer: _renderer, error: String(e) }; }
+};
+
+/* ════════════════════════ TEST 2: single pertStep ════════════════════════ */
+window.runStepTest = function () {
+  const s = glSetup(); if (s.error) return { error: s.error };
+  const gl = s.gl;
+  // reference points: a few iterates of the validated centers + a near-pole point
+  const oG = buildOrbit(CENTERS[0], 8), oD = buildOrbit(CENTERS[1], 8);
+  // moDip orbit's min-R iterate (the regime-2 stress)
+  let dipIdx = 1; for (let k = 1; k < 8; k++) if (oD.Rk[k] < oD.Rk[dipIdx]) dipIdx = k;
+  const VPOLE = [0.012, 0.018, 0.91];            // near +z axis (pole-ish, off-origin)
+  const mk = (V, mag, ddr) => ({ V, d: [mag, -mag * 0.7, mag * 0.4], ddr });
+  const CASES = [
+    mk(oG.V[3], 1e-3, 0),
+    mk(oG.V[3], 1e-9, 1.7e-8),
+    mk(oG.V[3], 1e-20, 1.7e-19),
+    mk(oG.V[3], 1e-40, 1.7e-39),
+    mk(oD.V[dipIdx], 1e-9, 1.7e-8),
+    mk(oD.V[dipIdx], 1e-30, 1.7e-29),
+    mk(VPOLE, 1e-9, 1.7e-8),
+    mk(oG.V[5], 1e-30, 1.7e-29),
+  ];
+  const DR_TEST = 37.5;                          // arbitrary reference-dr for the Δdr recurrence
+  // per-case reference texture in the standard layout
+  const len = CASES.length;
+  const data = new Float32Array(len * 4 * 4);
+  CASES.forEach((c, k) => {
+    const v = c.V, R = Math.hypot(...v);
+    const th = Math.acos(Math.max(-1, Math.min(1, v[2] / R))), ph = Math.atan2(v[1], v[0]);
+    const a = N * th, b = N * ph;
+    const hRn = hdrSplit(Math.pow(R, N)), hRp = hdrSplit(Math.pow(R, N - 1)), hDR = hdrSplit(DR_TEST);
+    const put = (row, vals) => { for (let j = 0; j < 4; j++) data[(row * len + k) * 4 + j] = vals[j]; };
+    put(0, [v[0], v[1], v[2], R]);
+    put(1, [Math.sin(a), Math.cos(a), Math.sin(b), Math.cos(b)]);
+    put(2, [hRn.m, hRn.e, hRp.m, hRp.e]);
+    put(3, [hDR.m, hDR.e, 0, 0]);
+  });
+  const dM = new Float32Array(len * 3), dE = new Float32Array(len * 3), ddr = new Float32Array(len * 4);
+  CASES.forEach((c, i) => {
+    for (let j = 0; j < 3; j++) { const h = hdrSplit(c.d[j]); dM[i * 3 + j] = h.m; dE[i * 3 + j] = h.e; }
+    const h = hdrSplit(c.ddr); ddr[i * 4] = h.m; ddr[i * 4 + 1] = h.e;
+  });
+  const FS = `
+uniform sampler2D uOrbit;
+uniform vec3 uDM[8]; uniform vec3 uDE[8];
+uniform vec4 uDdr[8];
+out vec4 o;
+void main(){
+  int i = int(gl_FragCoord.x);
+  int row = int(gl_FragCoord.y);
+  RefIter rf = fetchRef(uOrbit, i);
+  Hdr3 d = Hdr3(vec2(uDM[i].x, uDE[i].x), vec2(uDM[i].y, uDE[i].y), vec2(uDM[i].z, uDE[i].z));
+  vec2 Ddr = uDdr[i].xy;
+  StepOut so = pertStep(rf, d, Ddr);
+  if      (row == 0) o = vec4(so.delta.x, so.delta.y);
+  else if (row == 1) o = vec4(so.delta.z, so.Dr);
+  else               o = vec4(Ddr, 0.0, 0.0);
+}`;
+  try {
+    const prog = buildProg(gl, FS);
+    const tex = uploadOrbitTexture(gl, data, len);
+    const out = drawAndRead(gl, prog, len, 3, (gl, p) => {
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1i(gl.getUniformLocation(p, 'uOrbit'), 0);
+      gl.uniform3fv(gl.getUniformLocation(p, 'uDM'), dM);
+      gl.uniform3fv(gl.getUniformLocation(p, 'uDE'), dE);
+      gl.uniform4fv(gl.getUniformLocation(p, 'uDdr'), ddr);
+    });
+    const W = len, results = CASES.map((c, i) => ({
+      V: c.V, d: c.d, ddrIn: c.ddr, drTest: DR_TEST,
+      dx: [out[(0 * W + i) * 4], out[(0 * W + i) * 4 + 1]],
+      dy: [out[(0 * W + i) * 4 + 2], out[(0 * W + i) * 4 + 3]],
+      dz: [out[(1 * W + i) * 4], out[(1 * W + i) * 4 + 1]],
+      Dr: [out[(1 * W + i) * 4 + 2], out[(1 * W + i) * 4 + 3]],
+      Ddr: [out[(2 * W + i) * 4], out[(2 * W + i) * 4 + 1]],
+    }));
+    gl.deleteTexture(tex);
+    return { renderer: _renderer, results };
+  } catch (e) { return { renderer: _renderer, error: String(e) }; }
+};
+
+/* ════════════════════════ TEST 3: full perturbed orbit at depth ════════════════════════ */
+window.runOrbitTest = function (centerIdx) {
+  const s = glSetup(); if (s.error) return { error: s.error };
+  const gl = s.gl;
+  const C = CENTERS[centerIdx];
+  const ITERS = 14, LEN = ITERS + 2;
+  const orbit = buildOrbit(C, LEN);
+  const MAGS = [1e-3, 1e-6, 1e-9, 1e-15, 1e-24, 1e-30, 1e-40];
+  const dM = new Float32Array(8 * 3), dE = new Float32Array(8 * 3);
+  MAGS.forEach((mag, i) => {
+    const dpos = [mag, -mag * 0.7, mag * 0.4];
+    for (let j = 0; j < 3; j++) { const h = hdrSplit(dpos[j]); dM[i * 3 + j] = h.m; dE[i * 3 + j] = h.e; }
+  });
+  const FS = `
+uniform sampler2D uOrbit;
+uniform int uOrbitLen; uniform int uIters;
+uniform vec3 uDcM[8]; uniform vec3 uDcE[8];
+out vec4 o;
+void main(){
+  int i = int(gl_FragCoord.x);
+  int row = int(gl_FragCoord.y);
+  Hdr3 dc = Hdr3(vec2(uDcM[i].x, uDcE[i].x), vec2(uDcM[i].y, uDcE[i].y), vec2(uDcM[i].z, uDcE[i].z));
+  OrbitOut oo = pertOrbit(uOrbit, uOrbitLen, dc, uIters);
+  if      (row == 0) o = vec4(oo.d.x, oo.d.y);
+  else if (row == 1) o = vec4(oo.d.z, oo.Dr);
+  else if (row == 2) o = vec4(oo.Ddr, oo.de);
+  else               o = vec4(float(oo.iters), float(oo.rebases), oo.escaped ? 1.0 : 0.0, 0.0);
+}`;
+  try {
+    const prog = buildProg(gl, FS);
+    const tex = uploadOrbitTexture(gl, orbit.data, LEN);
+    const W = MAGS.length;
+    const out = drawAndRead(gl, prog, W, 4, (gl, p) => {
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1i(gl.getUniformLocation(p, 'uOrbit'), 0);
+      gl.uniform1i(gl.getUniformLocation(p, 'uOrbitLen'), LEN);
+      gl.uniform1i(gl.getUniformLocation(p, 'uIters'), ITERS);
+      gl.uniform3fv(gl.getUniformLocation(p, 'uDcM'), dM);
+      gl.uniform3fv(gl.getUniformLocation(p, 'uDcE'), dE);
+    });
+    const results = MAGS.map((mag, i) => ({
+      mag, dpos: [mag, -mag * 0.7, mag * 0.4],
+      dx: [out[(0 * W + i) * 4], out[(0 * W + i) * 4 + 1]],
+      dy: [out[(0 * W + i) * 4 + 2], out[(0 * W + i) * 4 + 3]],
+      dz: [out[(1 * W + i) * 4], out[(1 * W + i) * 4 + 1]],
+      Dr: [out[(1 * W + i) * 4 + 2], out[(1 * W + i) * 4 + 3]],
+      Ddr: [out[(2 * W + i) * 4], out[(2 * W + i) * 4 + 1]],
+      de: [out[(2 * W + i) * 4 + 2], out[(2 * W + i) * 4 + 3]],
+      iters: out[(3 * W + i) * 4], rebases: out[(3 * W + i) * 4 + 1], escaped: out[(3 * W + i) * 4 + 2],
+    }));
+    gl.deleteTexture(tex);
+    return { renderer: _renderer, center: C, iters: ITERS, results };
+  } catch (e) { return { renderer: _renderer, error: String(e) }; }
+};
+
+/* ════════════════════════ TEST 4: march-loop stub (compile + sanity) ════════════════════════ */
+window.runMarchTest = function () {
+  const s = glSetup(); if (s.error) return { error: s.error };
+  const gl = s.gl;
+  const C = CENTERS[0];
+  const ITERS = 14, LEN = ITERS + 2;
+  const orbit = buildOrbit(C, LEN);
+  // start offsets ~1e-2 from the reference point, march along a fixed ray.
+  // STUB: step policy / hit epsilon / camera are Fable's build — this only proves the
+  // HDR march scaffolding (t accumulation, δp = δp0 + t·dir in Hdr3) compiles and runs.
+  const dp0 = [0.02, 0.014, -0.008];
+  const dir = (() => { const d = [-1, -0.7, 0.4], L = Math.hypot(...d); return d.map(x => x / L); })();
+  const dpM = new Float32Array(3), dpE = new Float32Array(3);
+  for (let j = 0; j < 3; j++) { const h = hdrSplit(dp0[j]); dpM[j] = h.m; dpE[j] = h.e; }
+  const FS = `
+uniform sampler2D uOrbit;
+uniform int uOrbitLen; uniform int uIters;
+uniform vec3 uDp0M, uDp0E;
+uniform vec3 uRayDir;
+out vec4 o;
+void main(){
+  float px = gl_FragCoord.x;
+  Hdr3 dp0 = Hdr3(
+    hdrMulF(vec2(uDp0M.x, uDp0E.x), 1.0 + 0.25 * px),
+    hdrMulF(vec2(uDp0M.y, uDp0E.y), 1.0 + 0.25 * px),
+    hdrMulF(vec2(uDp0M.z, uDp0E.z), 1.0 + 0.25 * px));
+  vec2 t = vec2(0.0);
+  vec2 de = vec2(0.0);
+  int steps = 0;
+  for (int st = 0; st < 24; st++) {
+    Hdr3 dp = Hdr3(
+      hdrAdd(dp0.x, hdrMulF(t, uRayDir.x)),
+      hdrAdd(dp0.y, hdrMulF(t, uRayDir.y)),
+      hdrAdd(dp0.z, hdrMulF(t, uRayDir.z)));
+    OrbitOut oo = pertOrbit(uOrbit, uOrbitLen, dp, uIters);
+    de = oo.de;
+    steps = st + 1;
+    float def = abs(hdrToFloat(de));
+    if (def < 1e-7) break;                          // hit (stub epsilon)
+    t = hdrAdd(t, hdrFromFloat(min(def, 0.01)));    // stub advance: clamp step, always forward
+  }
+  o = vec4(float(steps), t.x, t.y, hdrToFloat(de));
+}`;
+  try {
+    const prog = buildProg(gl, FS);
+    const tex = uploadOrbitTexture(gl, orbit.data, LEN);
+    const out = drawAndRead(gl, prog, 4, 1, (gl, p) => {
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1i(gl.getUniformLocation(p, 'uOrbit'), 0);
+      gl.uniform1i(gl.getUniformLocation(p, 'uOrbitLen'), LEN);
+      gl.uniform1i(gl.getUniformLocation(p, 'uIters'), ITERS);
+      gl.uniform3fv(gl.getUniformLocation(p, 'uDp0M'), dpM);
+      gl.uniform3fv(gl.getUniformLocation(p, 'uDp0E'), dpE);
+      gl.uniform3fv(gl.getUniformLocation(p, 'uRayDir'), new Float32Array(dir));
+    });
+    const results = [0, 1, 2, 3].map(i => ({
+      steps: out[i * 4], tM: out[i * 4 + 1], tE: out[i * 4 + 2], deF: out[i * 4 + 3],
+    }));
+    gl.deleteTexture(tex);
+    return { renderer: _renderer, compiled: true, results };
+  } catch (e) { return { renderer: _renderer, compiled: false, error: String(e) }; }
+};
+
+window.__ready = true;
+</script></body></html>

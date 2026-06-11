@@ -1,0 +1,2048 @@
+<!DOCTYPE html>
+<!--
+═══════════════════════════════════════════════════════════════════════════════
+  MANDELBULB PERTURBATION DEEP-ZOOM — ATTRIBUTION & PROVENANCE
+  (Press ? in the app for the formatted About / Credits panel.)
+═══════════════════════════════════════════════════════════════════════════════
+
+  WHAT THIS IS
+    Real-time fly-navigation of the 3D Mandelbulb to ~1e-50 surface distance on a
+    consumer GPU (NVIDIA RTX 2070, WebGL2), via 3D perturbation theory. A literature
+    sweep (June 2026) found no published derivation, code, or demonstration of
+    Mandelbulb perturbation deep-zoom; prior renderers wall at ~1e-6 (f32) / ~1e-13
+    (f64). Every depth milestone is certified against an independent arbitrary-
+    precision referee sharing no code or math with the renderer.
+
+  STANDING ON THE SHOULDERS OF
+    • The Mandelbulb (triplex power-8 map) — Daniel White & Paul Nylander, with the
+      fractalforums community (2009).
+    • Perturbation theory for deep zoom — K. I. Martin, "SuperFractalThing" (2013).
+    • Distance-estimated ray marching — John C. Hart et al. (sphere tracing, 1996);
+      Mandelbulb DE practice popularized by Inigo Quilez and Mikael Hvidtfeldt
+      Christensen (Syntopia). The cosine colour palette is Quilez's.
+    • Rebasing & bilinear approximation (BLA) for perturbation — Zhuoran
+      (fractalforums, 2021–22); developed further in Claude Heiland-Allen's
+      Fraktaler-3 and the wider deep-zoom community (FractalShark, Imagina,
+      FractalShades; mathr.co.uk writings).
+    • Glitch-detection lineage — Pauldelbrot (fractalforums).
+    • 2D deep-zoom architecture, HDR float helpers, fly-slowdown — ported from GMT
+      (gmt-fractals.com), the GPL-3.0 fractal explorer this prototype extends.
+
+  PROJECT
+    Gigh Zack — project lead, GMT. Posed the problem, set the 1e-50 target, and flew
+    every acceptance flight (first human to navigate the Mandelbulb at 1e-20).
+    Diagnosed by eye three renderer defects that all automated suites had missed —
+    the first-order-Δθ formulation bug, the march overshoot, and the render-
+    resolution hit epsilon — the corrections that made the geometry true.
+    Feature direction from Lycium (Maxon): local camera lighting, camera-path export.
+
+  BUILT WITH CLAUDE CODE (Anthropic, June 2026)
+    Claude Opus 4.x — prep & consolidation: derived the exact triplex Jacobian and
+      the cancellation-free delta recurrence; proved the transcendental-free
+      (Chebyshev) high-precision reference orbit; built the CPU validation suites,
+      the BigInt direct referee, the GPU BLA port, and the march-population study.
+    Claude Fable 5 — research: established that double-single arithmetic is dead on
+      NVIDIA (EFT collapse) and selected HDR mantissa+exponent δ; found and fixed the
+      two O(1) cancellations and the first-order Δθ (root cause of the depth wall);
+      built the renderer (BigInt camera seam, HDR-t march, bisection hit refinement);
+      designed the certification methodology and the triplex BLA skip-table theory.
+    Methodology rule, twice earned here: implementation-agreement tests are circular
+      for formulation bugs — every certification keeps one referee that shares zero
+      math with the kernel.
+
+  WHAT IS NEW HERE, TO OUR KNOWLEDGE
+    An exact, cancellation-free perturbation recurrence for the non-analytic triplex
+    power (including the exact Δθ/Δφ residual forms); a perturbed distance-estimator
+    delta (Δr/Δdr) valid to 1e-50; BLA skip tables generalized to a 3D non-analytic
+    map; and the certified-depth methodology.
+
+  TECHNICAL SUBSTRATE
+    WebGL2 / GLSL ES 3.00 via ANGLE (d3d11, gl, vulkan — all verified) · HDR
+    (mantissa f32 + int exponent) δ arithmetic, no error-free transforms · BigInt
+    fixed-point (P=256, ~77 digits) reference orbits and camera, transcendental-free
+    via Chebyshev multiple-angle polynomials · per-frame reference rebuild at the
+    camera · Zhuoran-style conditional rebasing with Δdr re-anchor · verification via
+    a Playwright-driven real-GPU harness, f64 and BigInt direct referees, certified
+    11/11 from 1e-5 to 1e-50.
+
+  Built with Claude Code. GPL-3.0, in the spirit of the fractal community whose
+  shoulders this stands on.
+  Source & verification harness: github.com/gamazama/mandelbulb-deepzoom
+═══════════════════════════════════════════════════════════════════════════════
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mandelbulb Perturbation Deep-Zoom — 3D fractal explorer</title>
+<style>
+  html,body { margin:0; height:100%; background:#000; overflow:hidden; font:12px/1.4 monospace; color:#9fe; }
+  #gl { display:block; width:100vw; height:100vh; cursor:crosshair; image-rendering:pixelated; }
+  #hud { position:fixed; top:8px; left:8px; white-space:pre; pointer-events:none;
+         text-shadow:0 0 3px #000; background:rgba(0,0,0,.35); padding:6px 8px; border-radius:4px; }
+  #hud b { color:#fd6; }
+  #help { position:fixed; bottom:8px; left:8px; color:#678; white-space:pre; }
+  .warn { color:#f86; }
+  .ok { color:#6f8; }
+  #loading { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+             pointer-events:none; background:radial-gradient(rgba(0,0,0,.25),rgba(0,0,0,.55)); }
+  #loading .box { background:rgba(0,0,0,.55); padding:14px 20px; border-radius:8px; text-align:center;
+                  text-shadow:0 0 4px #000; }
+  #loading .spin { display:inline-block; animation:sp 1s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  #aboutbtn { position:fixed; top:8px; right:10px; color:#9ab; cursor:pointer; user-select:none;
+              background:rgba(0,0,0,.35); padding:3px 8px; border-radius:4px; font-size:12px; }
+  #aboutbtn:hover { color:#cfe; }
+  #about { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+           background:rgba(0,0,0,.72); z-index:10; }
+  #about .panel { max-width:760px; max-height:86vh; overflow:auto; background:#0c0f12; color:#bcd;
+                  border:1px solid #2a3a44; border-radius:8px; padding:22px 26px; line-height:1.55;
+                  box-shadow:0 8px 40px rgba(0,0,0,.6); }
+  #about h1 { font-size:15px; color:#cfe; margin:0 0 4px; letter-spacing:.04em; }
+  #about h2 { font-size:12px; color:#7fd1b0; margin:18px 0 5px; letter-spacing:.08em; text-transform:uppercase; }
+  #about p, #about li { font-size:12.5px; color:#aab8c2; margin:4px 0; }
+  #about b { color:#e8eef2; font-weight:600; }
+  #about ul { margin:4px 0; padding-left:18px; }
+  #about a { color:#7fd1b0; }
+  #about .sub { color:#677; font-size:11px; }
+  #about .x { float:right; color:#677; cursor:pointer; font-size:13px; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="loading"><div class="box"><span class="spin">◓</span> compiling deep renderer…<br>
+<small style="color:#9ab">first load only (~15&thinsp;s) — flying the f32 baseline meanwhile</small></div></div>
+<div id="hud"></div>
+<div id="aboutbtn">ⓘ about / credits</div>
+<div id="about"><div class="panel">
+  <span class="x">✕ close (?)</span>
+  <h1>Mandelbulb Perturbation Deep-Zoom</h1>
+  <p class="sub">Real-time fly-navigation of the 3D Mandelbulb to ~1e-50 surface distance on a consumer
+  GPU (WebGL2), via 3D perturbation theory. A literature sweep (June 2026) found no published
+  derivation, code, or demonstration of Mandelbulb perturbation deep-zoom; prior renderers wall at
+  ~1e-6 (f32) / ~1e-13 (f64). Every depth milestone is certified against an independent
+  arbitrary-precision referee that shares no code or math with the renderer.</p>
+
+  <h2>Standing on the shoulders of</h2>
+  <ul>
+    <li>The <b>Mandelbulb</b> (triplex power-8 map) — <b>Daniel White</b> &amp; <b>Paul Nylander</b>,
+        with the fractalforums community (2009).</li>
+    <li><b>Perturbation theory</b> for deep zoom — <b>K. I. Martin</b>, <i>SuperFractalThing</i> (2013).</li>
+    <li><b>Distance-estimated ray marching</b> — <b>John C. Hart</b> et al. (sphere tracing, 1996);
+        Mandelbulb DE practice popularized by <b>Inigo Quilez</b> and <b>Mikael Hvidtfeldt
+        Christensen</b> (Syntopia). The cosine colour palette is Quilez's.</li>
+    <li><b>Rebasing</b> &amp; <b>bilinear approximation (BLA)</b> for perturbation — <b>Zhuoran</b>
+        (fractalforums, 2021–22); developed further in <b>Claude Heiland-Allen</b>'s Fraktaler-3 and
+        the wider deep-zoom community (FractalShark, Imagina, FractalShades; mathr.co.uk).</li>
+    <li><b>Glitch-detection</b> lineage — <b>Pauldelbrot</b> (fractalforums).</li>
+    <li>2D deep-zoom architecture, HDR float helpers, fly-slowdown — ported from <b>GMT</b>
+        (<a href="https://gmt-fractals.com">gmt-fractals.com</a>), the GPL-3.0 explorer this extends.</li>
+  </ul>
+
+  <h2>Project</h2>
+  <p><b>Gigh Zack</b> — project lead, GMT. Posed the problem, set the 1e-50 target, and flew every
+  acceptance flight (first human to navigate the Mandelbulb at 1e-20). Diagnosed by eye three renderer
+  defects that all automated suites had missed — the first-order-Δθ formulation bug, the march
+  overshoot, and the render-resolution hit epsilon — the corrections that made the geometry true.
+  Feature direction from <b>Lycium</b> (Maxon): local camera lighting, camera-path export.</p>
+
+  <h2>Built with Claude Code (Anthropic, June 2026)</h2>
+  <p><b>Claude Opus 4.x</b> — prep &amp; consolidation: the exact triplex Jacobian and the
+  cancellation-free delta recurrence; the transcendental-free (Chebyshev) high-precision reference
+  orbit; the CPU validation suites, the BigInt direct referee, the GPU BLA port, the march-population
+  study. <b>Claude Fable 5</b> — research: that double-single arithmetic is dead on NVIDIA (EFT
+  collapse) → HDR mantissa+exponent δ; found and fixed the two O(1) cancellations and the first-order
+  Δθ (root cause of the depth wall); built the renderer; designed the certification methodology and
+  the triplex BLA theory.</p>
+  <p class="sub">Methodology rule, twice earned here: implementation-agreement tests are circular for
+  formulation bugs — every certification keeps one referee that shares zero math with the kernel.</p>
+
+  <h2>What is new here, to our knowledge</h2>
+  <p>An exact, cancellation-free perturbation recurrence for the non-analytic triplex power (including
+  the exact Δθ/Δφ residual forms); a perturbed distance-estimator delta (Δr/Δdr) valid to 1e-50; BLA
+  skip tables generalized to a 3D non-analytic map; and the certified-depth methodology.</p>
+
+  <h2>Substrate</h2>
+  <p class="sub">WebGL2 / GLSL ES 3.00 via ANGLE (d3d11, gl, vulkan — all verified) · HDR (mantissa f32
+  + int exponent) δ, no error-free transforms · BigInt fixed-point (P=256, ~77 digits) reference orbits
+  and camera, transcendental-free via Chebyshev · per-frame reference rebuild at the camera ·
+  Zhuoran-style conditional rebasing with Δdr re-anchor · real-GPU test harness with f64 and BigInt
+  direct referees, 11/11 certified 1e-5 → 1e-50.</p>
+  <p class="sub">Built with Claude Code. GPL-3.0, in the spirit of the fractal community whose shoulders
+  this stands on. &nbsp;Source &amp; verification harness:
+  <a href="https://github.com/gamazama/mandelbulb-deepzoom">github.com/gamazama/mandelbulb-deepzoom</a></p>
+</div></div>
+<div id="help">click to capture mouse · WASD move · Q/E down/up · SHIFT boost · mouse look · ESC release
+[ ] iterations · I auto-iters · P mode auto/deep/f32 · R deep-res divisor · N normals
+−/= power n · ,/. phase φ · ;/' phase θ · C color · 9/0 palette · F/G detail · L light · T/Y falloff · V gate · X export · M record path · ? about</div>
+<script>
+/* =============================================================================
+   GOLDEN PROBLEM HARNESS — Mandelbulb PERTURBATION DEEP-ZOOM RENDERER (Fable)
+   -----------------------------------------------------------------------------
+   The f32 baseline (below) is unchanged and used above ~1e-4 view scale.
+   DEEP MODE (auto below 1e-4, key P to force) fills the prep stubs:
+     • [DS-SEAM]   camera position is BigInt fixed-point (P=256, hp-orbit.test.mjs
+                   factory). The reference orbit is rebuilt AT the camera each frame
+                   → per-pixel offset is exactly  δc(t) = t·rd  with t carried in HDR.
+     • [PERT-STUB] KERNEL_CORE lifted VERBATIM from gpu-kernel.html (GPU-verified:
+                   gpu-kernel.test.mjs ALL PASS on d3d11/gl/vulkan vs BigInt truth).
+                   March: per step run pertOrbit(δc), de in HDR, depth-scaled hit
+                   epsilon de/t < pixel cone angle, t += 0.85·de (all HDR).
+     • GROUND-TRUTH GATE (brief §4): an independent CPU f64-perturbed march of the
+       center pixel (cancellation-free stableDelta + Δr/Δdr, JS) runs every ~0.5 s;
+       HUD shows rel-t agreement GPU vs CPU. A pretty picture that fails the gate
+       is a bug, not a zoom.
+   LOCKED RULES obeyed (FABLE_BRIEF §8): HDR δ only; residual stableDelta forms;
+   pure Zhuoran rebase (+ exhaustion wrap w/ Δdr re-anchor); reference len ≥ pixel
+   iteration budget (orbit built to iters+2, exhaustion wrap covers early escape);
+   BigInt fixed-point reference; orbit texture rows V/R | trig | R^N,R^7 HDR | DR HDR.
+   ============================================================================= */
+
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2', { antialias:false, preserveDrawingBuffer:false });
+if (!gl) { document.body.innerHTML = '<p style="color:#f66">WebGL2 unavailable</p>'; throw 0; }
+gl.getExtension('EXT_color_buffer_float');
+const floatBlend = gl.getExtension('EXT_float_blend');   // running-average accumulation into a float target
+
+/* ── power n + phase ψ (live; no recompile — N is a uniform, the binomial coeffs are uniforms,
+   phase is a constant angle offset the perturbation math is invariant to). Default n=8, ψ=0 must
+   reproduce the certified power-8 kernel byte-for-byte (binomials C(8,k) are exact integers). ── */
+let nPower = 8;                                  // integer Mandelbulb power (clamped [2,16])
+let phaseTheta = 0, phasePhi = 0;                // constant lobe-twist offsets on nθ, nφ
+const binom = (n) => { const c=[]; let v=1; for (let k=1;k<=n;k++){ v=v*(n-k+1)/k; c.push(v);} return c; };  // [C(n,1)..C(n,n)]
+function binomPad(n){ const c = binom(n), a = new Float32Array(17); for (let k=0;k<c.length;k++) a[k]=c[k]; return a; }
+let binomN = binomPad(nPower), binomN1 = binomPad(nPower-1);   // for (1+u)^n and (1+u)^(n-1)
+
+/* ════════ KERNEL CORE (GLSL ES 3.00) — VERBATIM from gpu-kernel.html ════════ */
+const KERNEL_CORE = `
+vec2 hdrFromFloat(float v) {
+  if (v == 0.0) return vec2(0.0, 0.0);
+  float e = floor(log2(abs(v)));
+  return vec2(v * exp2(-e), e);
+}
+float hdrToFloat(vec2 h) { return h.x * exp2(h.y); }
+vec2 hdrReduce(vec2 h) {
+  if (h.x == 0.0) return vec2(0.0, 0.0);
+  float adj = floor(log2(abs(h.x)));
+  return vec2(h.x * exp2(-adj), h.y + adj);
+}
+vec2 hdrAdd(vec2 a, vec2 b) {
+  if (a.x == 0.0) return b;
+  if (b.x == 0.0) return a;
+  if (a.y >= b.y) {
+    float shift = b.y - a.y;
+    if (shift < -40.0) return a;
+    return hdrReduce(vec2(a.x + b.x * exp2(shift), a.y));
+  } else {
+    float shift = a.y - b.y;
+    if (shift < -40.0) return b;
+    return hdrReduce(vec2(b.x + a.x * exp2(shift), b.y));
+  }
+}
+vec2 hdrSub(vec2 a, vec2 b) { return hdrAdd(a, vec2(-b.x, b.y)); }
+vec2 hdrMul(vec2 a, vec2 b) { return hdrReduce(vec2(a.x * b.x, a.y + b.y)); }
+vec2 hdrMulF(vec2 h, float s) { return hdrReduce(vec2(h.x * s, h.y)); }
+vec2 hdrDivF(vec2 h, float s) { return hdrReduce(vec2(h.x / s, h.y)); }
+vec2 hdrRecip(vec2 h) { if (h.x == 0.0) return vec2(0.0, 0.0); return hdrReduce(vec2(1.0 / h.x, -h.y)); }
+/* sqrt of a non-negative HDR value (mantissa positive). Force the exponent even so the
+   halved exponent is an integer; mantissa stays in [1,4) → sqrt in [1,2). */
+vec2 hdrSqrt(vec2 h) {
+  if (h.x <= 0.0) return vec2(0.0, 0.0);
+  float e = h.y, m = h.x;
+  if (mod(e, 2.0) != 0.0) { m *= 2.0; e -= 1.0; }
+  return hdrReduce(vec2(sqrt(m), e * 0.5));
+}
+/* magnitude compare for positive HDR values (mantissa normalized to [1,2)) */
+bool hdrGtPos(vec2 a, vec2 b){ return a.y > b.y || (a.y == b.y && a.x > b.x); }
+/* (1+u)^n − 1 = u·Σ C(n,k) u^(k-1), evaluated exactly (no cancellation) via Horner over the
+   binomial coefficients passed as uniforms — generalizes the old hardcoded power-8 polynomials.
+   uBinomN holds C(n,1..n); uBinomN1 holds C(n-1,1..n-1). Dynamic loop bound ⇒ no unroll blowup. */
+vec2 hdrPowm1N(vec2 u) {                 // (1+u)^uPowerI − 1
+  float uf = hdrToFloat(u);
+  float p = uBinomN[uPowerI-1];
+  for (int k = uPowerI-2; k >= 0; k--) p = p*uf + uBinomN[k];
+  return hdrMulF(u, p);
+}
+vec2 hdrPowm1N1(vec2 u) {                // (1+u)^(uPowerI-1) − 1
+  float uf = hdrToFloat(u);
+  int m = uPowerI - 1;
+  float p = uBinomN1[m-1];
+  for (int k = m-2; k >= 0; k--) p = p*uf + uBinomN1[k];
+  return hdrMulF(u, p);
+}
+vec2 hdrAtanTiny(vec2 num, float den) {
+  float r = hdrToFloat(num) / den;
+  if (abs(r) > 0.1) return hdrFromFloat(atan(hdrToFloat(num), den));
+  float r2 = r * r;
+  return hdrMulF(hdrDivF(num, den), 1.0 - r2 * (0.33333333 - r2 * (0.2 - r2 * 0.14285714)));
+}
+void hdrSinCosm1(vec2 x, out vec2 s, out vec2 cm1) {
+  float xf = hdrToFloat(x);
+  if (abs(xf) > 0.1) {
+    float sx = sin(xf), cx = cos(xf);
+    s = hdrFromFloat(sx);
+    cm1 = hdrFromFloat(-sx * sx / (1.0 + cx));
+  } else {
+    float x2 = xf * xf;
+    s = hdrMulF(x, 1.0 - x2 * 0.16666667 + x2 * x2 * 0.0083333333);
+    cm1 = hdrMulF(hdrMul(x, x), -0.5 * (1.0 - x2 * 0.083333333 + x2 * x2 * 0.0027777778));
+  }
+}
+struct Hdr3 { vec2 x; vec2 y; vec2 z; };
+Hdr3 h3Zero() { return Hdr3(vec2(0.0), vec2(0.0), vec2(0.0)); }
+Hdr3 h3FromVec3(vec3 v) { return Hdr3(hdrFromFloat(v.x), hdrFromFloat(v.y), hdrFromFloat(v.z)); }
+vec3 h3ToVec3(Hdr3 h) { return vec3(hdrToFloat(h.x), hdrToFloat(h.y), hdrToFloat(h.z)); }
+Hdr3 h3Add(Hdr3 a, Hdr3 b) { return Hdr3(hdrAdd(a.x, b.x), hdrAdd(a.y, b.y), hdrAdd(a.z, b.z)); }
+vec2 h3DotF(vec3 a, Hdr3 b) {
+  return hdrAdd(hdrAdd(hdrMulF(b.x, a.x), hdrMulF(b.y, a.y)), hdrMulF(b.z, a.z));
+}
+vec2 h3Dot(Hdr3 a, Hdr3 b) {
+  return hdrAdd(hdrAdd(hdrMul(a.x, b.x), hdrMul(a.y, b.y)), hdrMul(a.z, b.z));
+}
+struct RefIter { vec3 V; float R; float sa; float ca; float sb; float cb; vec2 Rn; vec2 Rp; vec2 DR; };
+RefIter fetchRef(sampler2D orbit, int i) {
+  vec4 t0 = texelFetch(orbit, ivec2(i, 0), 0);
+  vec4 t1 = texelFetch(orbit, ivec2(i, 1), 0);
+  vec4 t2 = texelFetch(orbit, ivec2(i, 2), 0);
+  vec4 t3 = texelFetch(orbit, ivec2(i, 3), 0);
+  return RefIter(t0.xyz, t0.w, t1.x, t1.y, t1.z, t1.w, t2.xy, t2.zw, t3.xy);
+}
+struct StepOut { Hdr3 delta; vec2 Dr; };
+StepOut pertStep(RefIter rf, Hdr3 d, inout vec2 Ddr) {
+  vec3 V = rf.V; float R = rf.R;
+  vec3 df = h3ToVec3(d);
+  vec2 q = hdrAdd(hdrMulF(h3DotF(V, d), 2.0), h3Dot(d, d));
+  float r2f = sqrt(max(R * R + hdrToFloat(q), 0.0));
+  vec2 Dr = hdrDivF(q, r2f + R);
+  vec2 u = hdrDivF(Dr, R);
+  vec2 dRn = hdrMul(rf.Rn, hdrPowm1N(u));
+  vec2 Dp = hdrMul(rf.Rp, hdrPowm1N1(u));
+  Ddr = hdrMulF(hdrAdd(hdrMul(Dp, rf.DR), hdrMul(hdrAdd(rf.Rp, Dp), Ddr)), uPower);
+  vec2 nphi = hdrSub(hdrMulF(d.y, V.x), hdrMulF(d.x, V.y));
+  float denPhi = V.x * (V.x + df.x) + V.y * (V.y + df.y);
+  vec2 Dphi = hdrAtanTiny(nphi, denPhi);
+  float rho = length(V.xy);
+  /* §3c EXACT polar-angle delta (2026-06-10 fix). The previous first-order form
+     atan2(dot(thv,d), R+dot(rh,d)) seeds O(δ²) per-step error that chaos-amplifies
+     (×~8/iter) to O(δ) over near-critical 30-90-iteration orbits → wrong escape
+     bands (found by direct-f64 cross-check, direct-check.test.mjs). Exact form,
+     same construction as the (already exact) Δφ:
+       Δθ = atan2(ρ′·Vz − ρ·z′, ρρ′ + Vz·z′) = atan2(dρ·Vz − ρ·dz, ρρ′ + Vz(Vz+dz))
+       dρ = qρ/(ρ′+ρ),  qρ = 2(Vx·dx + Vy·dy) + dx² + dy²   (cancellation-free) */
+  vec2 qr = hdrAdd(hdrMulF(hdrAdd(hdrMulF(d.x, V.x), hdrMulF(d.y, V.y)), 2.0),
+                   hdrAdd(hdrMul(d.x, d.x), hdrMul(d.y, d.y)));
+  float rhoP = sqrt(max(rho * rho + hdrToFloat(qr), 0.0));
+  vec2 drho = hdrDivF(qr, rhoP + rho);
+  vec2 nth = hdrSub(hdrMulF(drho, V.z), hdrMulF(d.z, rho));
+  float denTh = rho * rhoP + V.z * (V.z + df.z);
+  vec2 Dth = hdrAtanTiny(nth, denTh);
+  vec2 Da = hdrMulF(Dth, uPower), Db = hdrMulF(Dphi, uPower);
+  vec2 sA, cAm, sB, cBm;
+  hdrSinCosm1(Da, sA, cAm);
+  hdrSinCosm1(Db, sB, cBm);
+  float sa = rf.sa, ca = rf.ca, sb = rf.sb, cb = rf.cb;
+  vec2 dsA = hdrAdd(hdrMulF(cAm, sa), hdrMulF(sA, ca));
+  vec2 dcA = hdrSub(hdrMulF(cAm, ca), hdrMulF(sA, sa));
+  vec2 dsB = hdrAdd(hdrMulF(cBm, sb), hdrMulF(sB, cb));
+  vec2 dcB = hdrSub(hdrMulF(cBm, cb), hdrMulF(sB, sb));
+  Hdr3 DD = Hdr3(
+    hdrAdd(hdrAdd(hdrMulF(dcB, sa), hdrMulF(dsA, cb)), hdrMul(dsA, dcB)),
+    hdrAdd(hdrAdd(hdrMulF(dsB, sa), hdrMulF(dsA, sb)), hdrMul(dsA, dsB)),
+    dcA);
+  vec3 Dref = vec3(sa * cb, sa * sb, ca);
+  Hdr3 delta = Hdr3(
+    hdrAdd(hdrMul(rf.Rn, DD.x), hdrMul(dRn, hdrAdd(hdrFromFloat(Dref.x), DD.x))),
+    hdrAdd(hdrMul(rf.Rn, DD.y), hdrMul(dRn, hdrAdd(hdrFromFloat(Dref.y), DD.y))),
+    hdrAdd(hdrMul(rf.Rn, DD.z), hdrMul(dRn, hdrAdd(hdrFromFloat(Dref.z), DD.z))));
+  return StepOut(delta, Dr);
+}
+/* ════════ BLA (bivariate linear approximation) skip-table runtime ════════
+   A precomputed table of composed linear operators (bla.test.mjs blaBuild, CPU-validated
+   τ=1e-5) skips RUNS of perturbation iterations: δ' = A·δ + B·δc, Δdr' = g·δ + a·Δdr + h·δc.
+   Table is a RGBA32F texture (uBlaTab): row = level (1..uBlaMaxLvl), column = runIdx·14 + j.
+   Per run = 14 texels: t0=(rA,rB) | t1=(a,A0) | t2..t5=A1..A8 | t6..t10.xy=B0..B8 |
+   t10.zw,t11=g0..g2 | t12,t13.xy=h0..h2.  All entries HDR pairs (reach ~1e±140).
+   #ifdef'd OUT of the default deep program so it compiles fast (the nested skip loop +
+   13 texelFetches roughly doubles ANGLE→HLSL compile time and blocks page load); only the
+   lazily-built BLA variant defines USE_BLA. */
+#ifdef USE_BLA
+int blaTrailingZeros(int m) {           // levels descend on trailing zeros of m
+  int n = 0;
+  for (int i = 0; i < 24; i++) { if ((m & 1) != 0) break; m >>= 1; n++; }
+  return n;
+}
+void blaFetchRamp(sampler2D tab, int lvl, int idx, out vec2 rA, out vec2 rB) {
+  vec4 t0 = texelFetch(tab, ivec2(idx * 14, lvl), 0);   // cheap validity pre-check (t0 only)
+  rA = t0.xy; rB = t0.zw;
+}
+/* Apply one validated run STRAIGHT-LINE (no struct/array temporaries — those make the
+   ANGLE→HLSL compiler crawl). Reads texels t1..t13 (t0 already read for validity),
+   forms δ' = A·δ + B·δc and Δdr' = g·δ + a·Δdr + h·δc, all in HDR. */
+Hdr3 blaApply(sampler2D tab, int lvl, int idx, Hdr3 d, Hdr3 dc, inout vec2 Ddr) {
+  int x = idx * 14;
+  vec4 t1 =texelFetch(tab,ivec2(x+ 1,lvl),0), t2 =texelFetch(tab,ivec2(x+ 2,lvl),0);
+  vec4 t3 =texelFetch(tab,ivec2(x+ 3,lvl),0), t4 =texelFetch(tab,ivec2(x+ 4,lvl),0);
+  vec4 t5 =texelFetch(tab,ivec2(x+ 5,lvl),0), t6 =texelFetch(tab,ivec2(x+ 6,lvl),0);
+  vec4 t7 =texelFetch(tab,ivec2(x+ 7,lvl),0), t8 =texelFetch(tab,ivec2(x+ 8,lvl),0);
+  vec4 t9 =texelFetch(tab,ivec2(x+ 9,lvl),0), t10=texelFetch(tab,ivec2(x+10,lvl),0);
+  vec4 t11=texelFetch(tab,ivec2(x+11,lvl),0), t12=texelFetch(tab,ivec2(x+12,lvl),0);
+  vec4 t13=texelFetch(tab,ivec2(x+13,lvl),0);
+  /* a=t1.xy | A rows: (t1.zw,t2.xy,t2.zw)(t3.xy,t3.zw,t4.xy)(t4.zw,t5.xy,t5.zw)
+     B rows: (t6.xy,t6.zw,t7.xy)(t7.zw,t8.xy,t8.zw)(t9.xy,t9.zw,t10.xy)
+     g=(t10.zw,t11.xy,t11.zw) | h=(t12.xy,t12.zw,t13.xy) */
+  Hdr3 Ad = Hdr3(
+    hdrAdd(hdrAdd(hdrMul(t1.zw,d.x),hdrMul(t2.xy,d.y)),hdrMul(t2.zw,d.z)),
+    hdrAdd(hdrAdd(hdrMul(t3.xy,d.x),hdrMul(t3.zw,d.y)),hdrMul(t4.xy,d.z)),
+    hdrAdd(hdrAdd(hdrMul(t4.zw,d.x),hdrMul(t5.xy,d.y)),hdrMul(t5.zw,d.z)));
+  Hdr3 Bdc = Hdr3(
+    hdrAdd(hdrAdd(hdrMul(t6.xy,dc.x),hdrMul(t6.zw,dc.y)),hdrMul(t7.xy,dc.z)),
+    hdrAdd(hdrAdd(hdrMul(t7.zw,dc.x),hdrMul(t8.xy,dc.y)),hdrMul(t8.zw,dc.z)),
+    hdrAdd(hdrAdd(hdrMul(t9.xy,dc.x),hdrMul(t9.zw,dc.y)),hdrMul(t10.xy,dc.z)));
+  vec2 gd  = hdrAdd(hdrAdd(hdrMul(t10.zw,d.x),hdrMul(t11.xy,d.y)),hdrMul(t11.zw,d.z));
+  vec2 hdc = hdrAdd(hdrAdd(hdrMul(t12.xy,dc.x),hdrMul(t12.zw,dc.y)),hdrMul(t13.xy,dc.z));
+  Ddr = hdrAdd(hdrAdd(gd, hdrMul(t1.xy, Ddr)), hdc);   // uses OLD Ddr and OLD d
+  return Hdr3(hdrAdd(Ad.x,Bdc.x), hdrAdd(Ad.y,Bdc.y), hdrAdd(Ad.z,Bdc.z));
+}
+#endif
+struct OrbitOut { Hdr3 d; vec2 Dr; vec2 Ddr; vec2 de; int iters; int rebases; bool escaped; float trap; };
+OrbitOut pertOrbit(sampler2D orbit, int orbitLen, Hdr3 dc, int maxIter) {
+  Hdr3 d = dc;
+  vec2 Ddr = vec2(0.0);
+  int m = 0, rebases = 0, it = 0;
+  bool escaped = false;
+  float trap = 1e30;                          // orbit trap: min |z_k| over the orbit (origin trap)
+#ifdef USE_BLA
+  vec2 dcMag = hdrSqrt(h3Dot(dc, dc));        // |δc| (rd normalized ⇒ ≈ |t|) for BLA validity
+#endif
+  for (int loop = 0; loop < 512; loop++) {
+    if (it >= maxIter) break;
+    bool applied = false;
+#ifdef USE_BLA
+    if (uBla == 1) {
+      /* descend BLA levels: lvlMax = trailing-zeros(m) (m=0 ⇒ maxLvl). Apply the
+         deepest run whose validity bound |δ| ≤ rA − rB·|δc| holds (conservative,
+         sound — within it Zhuoran cannot fire, escape cannot cross bailout). */
+      int lvlMax = (m == 0) ? uBlaMaxLvl : min(uBlaMaxLvl, blaTrailingZeros(m));
+      vec2 dMag = lvlMax >= 1 ? hdrSqrt(h3Dot(d, d)) : vec2(0.0);   // skip sqrt on no-level steps
+      for (int lvl = lvlMax; lvl >= 1; lvl--) {        // dynamic bound ⇒ not unrolled
+        int span = 1 << lvl;
+        if (m + span > uBlaUsable) continue;
+        if (it + span > maxIter) continue;
+        int idx = m >> lvl;
+        vec2 rA, rB;
+        blaFetchRamp(uBlaTab, lvl, idx, rA, rB);
+        if (rA.x <= 0.0) continue;                       // rA=0 ⇒ run invalid (escape-unsafe)
+        vec2 lim = hdrSub(rA, hdrMul(rB, dcMag));
+        if (lim.x <= 0.0) continue;                      // bound non-positive ⇒ |δ| can't satisfy
+        if (hdrGtPos(dMag, lim)) continue;               // |δ| > bound ⇒ linearization not valid
+        d = blaApply(uBlaTab, lvl, idx, d, dc, Ddr);     // δ ← A·δ+B·δc, Δdr ← g·δ+a·Δdr+h·δc
+        m += span; it += span;
+        applied = true;
+        break;
+      }
+    }
+#endif
+    if (!applied) {
+      RefIter rf = fetchRef(orbit, m);
+      StepOut so = pertStep(rf, d, Ddr);
+      d = h3Add(so.delta, dc);
+      m++; it++;
+    }
+    RefIter rn = fetchRef(orbit, m);
+    vec3 df = h3ToVec3(d);
+    vec3 zf = rn.V + df;
+    trap = min(trap, dot(zf, zf));            // track min |z|² (sqrt once at the end)
+    if (dot(zf, zf) > 4.0) { escaped = true; break; }
+    if (dot(zf, zf) < dot(df, df) || m >= orbitLen - 1) {
+      d = h3FromVec3(zf - fetchRef(orbit, 0).V);
+      Ddr = hdrAdd(hdrSub(rn.DR, vec2(1.0, 0.0)), Ddr);
+      m = 0; rebases++;
+    }
+  }
+  RefIter rf = fetchRef(orbit, m);
+  vec2 q = hdrAdd(hdrMulF(h3DotF(rf.V, d), 2.0), h3Dot(d, d));
+  float r2f = sqrt(max(rf.R * rf.R + hdrToFloat(q), 0.0));
+  vec2 Dr = hdrDivF(q, r2f + rf.R);
+  vec2 drH = hdrAdd(rf.DR, Ddr);
+  float rF = max(r2f, 1e-12);
+  vec2 de = hdrMul(hdrFromFloat(0.5 * rF * log(rF)), hdrRecip(drH));
+  return OrbitOut(d, Dr, Ddr, de, it, rebases, escaped, sqrt(trap));
+}
+`;
+
+/* ---------- shaders ---------- */
+const VERT = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
+
+const FRAG = `#version 300 es
+precision highp float;
+out vec4 o;
+uniform vec2  uRes;
+uniform vec3  uCamPos;
+uniform vec3  uRight, uUp, uFwd;
+uniform float uFovScale;
+uniform float uPower;
+uniform float uIters;
+uniform float uPrecRatio;
+uniform vec3  uLightDir;
+uniform vec2  uPhase;
+float deMandelbulb(vec3 pos){
+    vec3 z = pos; float dr = 1.0; float r = 0.0;
+    int N = int(uIters);
+    for (int i=0;i<256;i++){
+        if (i>=N) break;
+        r = length(z);
+        if (r > 2.0) break;
+        float rp1 = pow(r, uPower-1.0);
+        dr = rp1*uPower*dr + 1.0;
+        float theta = acos(clamp(z.z/r,-1.0,1.0));
+        float phi   = atan(z.y, z.x);
+        theta = theta*uPower + uPhase.x; phi = phi*uPower + uPhase.y;
+        float zr = rp1*r;
+        z = zr*vec3(sin(theta)*cos(phi), sin(phi)*sin(theta), cos(theta)) + pos;
+    }
+    return 0.5*log(max(r,1e-8))*r/max(dr,1e-20);
+}
+vec3 normal(vec3 p, float e){
+    vec2 k = vec2(1.,-1.);
+    return normalize(
+        k.xyy*deMandelbulb(p+k.xyy*e) + k.yyx*deMandelbulb(p+k.yyx*e) +
+        k.yxy*deMandelbulb(p+k.yxy*e) + k.xxx*deMandelbulb(p+k.xxx*e));
+}
+void main(){
+    vec2 uv = (gl_FragCoord.xy - 0.5*uRes) / uRes.y;
+    vec3 ro = uCamPos;
+    vec3 rd = normalize(uFwd + uFovScale*(uv.x*uRight + uv.y*uUp));
+    float t = 0.0; float d = 1e9; int steps=0; bool hit=false;
+    for (int i=0;i<512;i++){
+        steps=i;
+        vec3 p = ro + rd*t;
+        d = deMandelbulb(p);
+        float eps = max(1e-20, length(p)*uPrecRatio);
+        if (d < eps){ hit=true; break; }
+        if (t > 12.0) break;
+        t += d*0.9;
+    }
+    vec3 col = vec3(0.02,0.03,0.05);
+    if (hit){
+        vec3 p = ro + rd*t;
+        float eps = max(1e-20, length(p)*uPrecRatio);
+        vec3 n = normal(p, eps*2.0);
+        float diff = max(0.0, dot(n, uLightDir));
+        float ao = 1.0 - float(steps)/512.0;
+        col = (0.15 + 0.85*diff) * vec3(0.55,0.62,0.78) * (0.4+0.6*ao);
+        col += pow(max(0.0,dot(reflect(rd,n),uLightDir)),24.0)*0.3;
+    }
+    col = pow(col, vec3(0.4545));
+    o = vec4(col,1.0);
+}`;
+
+/* ---------- DEEP fragment shader: HDR-t perturbation march ---------- */
+const DEEP_FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+out vec4 o;
+uniform vec2  uRes;
+uniform vec3  uRight, uUp, uFwd;
+uniform float uFovScale;
+uniform sampler2D uOrbit;
+uniform int   uOrbitLen;
+uniform int   uIters;
+uniform vec3  uLightDir;
+uniform int   uProbe;            // 1 = center-ray numeric probe (gate readback)
+uniform vec2  uProbeT;           // probe ray parameter t (HDR) — de is evaluated AT this t
+uniform vec2  uSpreadT;          // probe-2 grid spread (HDR): δc = spread·(uv.x·right + uv.y·up)
+uniform float uPixAng;           // hit-epsilon cone half-angle — DISPLAY pixel, NOT render-res
+                                 // (the ÷4-res-derived epsilon inflated geometry by ~6 display px)
+uniform vec3  uCamPosF;          // f32 camera position — far-field (t > 1e-3) hybrid march only
+uniform int   uNormalMode;       // 0 = screen-space (dFdx/dFdy, 0 orbits) | 1 = 3-tap | 2 = 4-tap
+uniform int   uBisectMax;        // bisection iteration cap (default 12; early-break ends most ≪ this)
+uniform vec2  uJitter;           // sub-pixel uv jitter for progressive (temporal) accumulation
+uniform float uPower;            // Mandelbulb power n (float, for the ×n multiplies)
+uniform int   uPowerI;           // power n (int, for the binomial Horner loop bound)
+uniform float uBinomN[17];       // C(n,1..n)   — (1+u)^n − 1
+uniform float uBinomN1[17];      // C(n-1,1..n-1) — (1+u)^(n-1) − 1
+uniform vec2  uPhase;            // lobe-twist phase (θ, φ) — used by the f32 far-field DE only
+uniform int   uColorMode;        // 0 = plain | 1 = iteration (escape time) | 2 = orbit trap (origin)
+uniform float uColorScale;       // palette frequency
+uniform int   uLightMode;        // 0 = directional | 1 = camera headlamp | 2 = both
+uniform vec2  uFalloff;          // headlamp falloff length L (HDR; = smoothedDist · mul)
+uniform int       uBla;          // 1 = BLA skip-table path on (else exact per-step §3)
+uniform sampler2D uBlaTab;       // BLA run table — row=level, col=runIdx*14+j (RGBA32F)
+uniform int       uBlaMaxLvl;    // deepest level present in the table
+uniform int       uBlaUsable;    // runs must end at orbit index ≤ usable (= orbitLen-1)
+${KERNEL_CORE}
+/* plain f32 DE for the far-field hybrid segment (t > T_SWITCH the features are
+   f32-resolvable; identical to the baseline shader's deMandelbulb, power n + phase) */
+float deF32(vec3 pos){
+    vec3 z = pos; float dr = 1.0, r = 0.0;
+    int N = int(uIters);
+    for (int i = 0; i < 256; i++) {
+        if (i >= N) break;
+        r = length(z);
+        if (r > 2.0) break;
+        float rp1 = pow(r, uPower-1.0);
+        dr = rp1*uPower*dr + 1.0;
+        float theta = acos(clamp(z.z/r, -1.0, 1.0)) * uPower + uPhase.x;
+        float phi = atan(z.y, z.x) * uPower + uPhase.y;
+        float zr = rp1*r;
+        z = zr*vec3(sin(theta)*cos(phi), sin(phi)*sin(theta), cos(theta)) + pos;
+    }
+    return 0.5*log(max(r,1e-8))*r/max(dr,1e-20);
+}
+vec3 normalF32(vec3 p, float e){
+    vec2 k = vec2(1.,-1.);
+    return normalize(
+        k.xyy*deF32(p+k.xyy*e) + k.yyx*deF32(p+k.yyx*e) +
+        k.yxy*deF32(p+k.yxy*e) + k.xxx*deF32(p+k.xxx*e));
+}
+/* de (HDR) at ray parameter t (HDR) along f32 dir rd: δc = t·rd.
+   esc=false ⇒ the orbit did NOT escape within budget ⇒ the point is inside the
+   n-iteration surface — its de is WRAPPED GARBAGE and must be treated as a hit,
+   never trusted for stepping (the second placement-failure mechanism). */
+vec2 deAt(vec2 t, vec3 rd, out bool esc) {
+  Hdr3 dp = Hdr3(hdrMulF(t, rd.x), hdrMulF(t, rd.y), hdrMulF(t, rd.z));
+  OrbitOut oo = pertOrbit(uOrbit, uOrbitLen, dp, uIters);
+  esc = oo.escaped;
+  return oo.de;
+}
+/* IQ cosine palette */
+vec3 palette(float s){ return 0.5 + 0.5*cos(6.2831853*(s + vec3(0.0, 0.33, 0.67))); }
+/* surface colour from the orbit at the hit (1 = escape-time bands, 2 = origin orbit-trap filigree) */
+vec3 surfaceColor(vec2 t, vec3 rd){
+  if (uColorMode == 0) return vec3(0.62,0.55,0.78);
+  OrbitOut co = pertOrbit(uOrbit, uOrbitLen, Hdr3(hdrMulF(t,rd.x),hdrMulF(t,rd.y),hdrMulF(t,rd.z)), uIters);
+  float s = uColorMode == 1 ? float(co.iters)*0.08 : co.trap;
+  return palette(s * uColorScale);
+}
+/* The near-field HDR perturbation march (capped anti-arm-skip stepping + bisection onto the
+   n-iter boundary). Shared by the render path AND probe 3 (population study) so they march
+   IDENTICALLY. Returns the surface t (HDR); sets hit, steps, de-at-hit, and tF≥0 if the ray
+   handed off to the far-field f32 segment (t>T_SWITCH). */
+vec2 marchNear(vec3 rd, float pa, out bool hit, out int steps, out vec2 deOut, out float tF) {
+  vec2 t = vec2(0.0), tPrev = vec2(0.0), cap = vec2(0.0), de = vec2(0.0);
+  hit = false; steps = 0; tF = -1.0; bool esc = false;
+  for (int st = 0; st < 256; st++) {
+    steps = st;
+    de = deAt(t, rd, esc);
+    if (!esc || de.x <= 0.0) {
+      /* bracket [tPrev,t] starts at the LAST (capped) step, already ≪ the cone, so the
+         w<0.25·pa early-break ends most bisections in a few iters; uBisectMax (≈12) just
+         bounds the worst lane (warp divergence makes all lanes pay the slowest). */
+      for (int b = 0; b < 32; b++) {
+        if (b >= uBisectMax) break;
+        vec2 tm = hdrMulF(hdrAdd(tPrev, t), 0.5);
+        bool me; vec2 md = deAt(tm, rd, me);
+        if (!me || md.x <= 0.0) t = tm; else { tPrev = tm; de = md; }
+        float w = hdrToFloat(hdrMul(hdrSub(t, tPrev), hdrRecip(t)));
+        if (w < 0.25 * pa) break;
+      }
+      t = tPrev; hit = true; break;                  // escaped-side boundary point
+    }
+    if (t.x != 0.0) {
+      float ratio = hdrToFloat(hdrMul(de, hdrRecip(t)));
+      if (ratio < pa) { hit = true; break; }
+      if (hdrToFloat(t) > 1e-3) { tF = hdrToFloat(t); break; }   // hand off to f32 far-field
+    }
+    tPrev = t;
+    vec2 step = hdrMulF(de, 0.85);
+    if (cap.x == 0.0) cap = hdrMulF(de, 0.05);
+    vec2 capEff = (t.x != 0.0 && hdrGtPos(t, cap)) ? t : cap;
+    if (hdrGtPos(step, capEff)) step = capEff;
+    cap = hdrMulF(cap, 1.25);
+    t = hdrAdd(t, step);
+  }
+  deOut = de;
+  return t;
+}
+void main(){
+    vec2 uv = (gl_FragCoord.xy - 0.5*uRes) / uRes.y + uJitter;   // jitter ⇒ temporal supersample/denoise
+    if (uProbe == 1) uv = vec2(0.0);
+    vec3 rd = normalize(uFwd + uFovScale*(uv.x*uRight + uv.y*uUp));
+    if (uProbe == 1) {
+        /* POINTWISE gate probe: de at exactly t = uProbeT on the center ray.
+           March-termination comparison is ill-conditioned (steps jump folds);
+           same-input de comparison is the meaningful §4 ground-truth check. */
+        bool pesc;
+        vec2 pde = deAt(uProbeT, rd, pesc);
+        o = vec4(pde, pesc ? 1.0 : 0.0, 0.0);
+        return;
+    }
+    if (uProbe == 2) {
+        /* POPULATION probe: one pertOrbit per grid pixel at transverse offset
+           δc = spread·(uv.x·right + uv.y·up) — measures the near-critical pixel
+           population (escape-flag flips vs the CPU referee) at view scale. */
+        vec3 cv = uv.x*uRight + uv.y*uUp;
+        Hdr3 dc = Hdr3(hdrMulF(uSpreadT, cv.x), hdrMulF(uSpreadT, cv.y), hdrMulF(uSpreadT, cv.z));
+        OrbitOut oo = pertOrbit(uOrbit, uOrbitLen, dc, uIters);
+        o = vec4(oo.de, oo.escaped ? 1.0 : 0.0, float(oo.iters));
+        return;
+    }
+    float pixAng = uPixAng;                      // display-pixel cone half-angle ≈ hit epsilon / t
+    bool hit = false; int steps = 0; bool exhausted = false; bool farHit = false;
+    float tF = -1.0;                             // ≥0 once the far-field f32 segment takes over
+    vec2 de = vec2(0.0);
+    vec2 t = marchNear(rd, pixAng, hit, steps, de, tF);   // shared near-field HDR march
+    if (uProbe == 3) {
+        /* MARCH-POPULATION probe (SLICE 6b): emit the surface position from the SAME march the
+           renderer runs (marchNear inlined ONCE) — the user-visible quantity. Output
+           (tHit HDR, hitFlag, steps); the CPU referee (pertMarchJS, same bisection) mirrors it. */
+        o = vec4(hit ? t : vec2(0.0), hit ? 1.0 : 0.0, float(steps));
+        return;
+    }
+    /* far-field f32 segment: features at t > T_SWITCH(=1e-3) are f32-resolvable; the f32
+       camera position error (~1e-7 abs) is sub-cone at these distances. This is also
+       what lets grazing/background rays at extreme depth terminate (they exhausted
+       the 256-step HDR budget before). */
+    if (!hit && tF > 0.0) {
+        vec3 roF = uCamPosF;
+        for (int st = 0; st < 256; st++) {
+            vec3 p = roF + rd*tF;
+            float d = deF32(p);
+            if (d < pixAng*tF) { farHit = true; break; }
+            if (tF > 12.0) break;
+            tF += d*0.9;
+        }
+    } else if (!hit && tF < 0.0 && hdrToFloat(t) <= 1e-3) {
+        exhausted = true;                                  // HDR budget ran out mid-field
+    }
+    /* LOG-DEPTH screen-space derivatives — computed in UNIFORM control flow (all lanes) so
+       dFdx/dFdy are well-defined; only hit lanes consume them. The surface point is P = O + t·rd
+       with t in HDR; dividing ∂P by the (positive) depth t leaves
+         ∂P/∂x / t = ∂(ln t)/∂x · rd + ∂rd/∂x,
+       which is SCALE-FREE — the depth magnitude never touches f32, so no per-frame exponent and no
+       under/overflow. ln(t) = ln(mantissa) + exponent·ln2. ZERO extra orbits. */
+    float Lt = log(max(t.x, 1e-30)) + t.y * 0.6931472;   // ln(t) for HDR t
+    float dLx = dFdx(Lt), dLy = dFdy(Lt);
+    vec3  dRx = dFdx(rd), dRy = dFdy(rd);
+    vec3 col = vec3(0.02,0.03,0.05);
+    if (hit) {
+        vec3 n;
+        if (uNormalMode == 0) {
+            /* screen-space normal: no pertOrbit at all. Coarse at silhouettes (mixed hit/miss
+               quads) but free; the fly is ÷4 live anyway. */
+            n = normalize(cross(dLx*rd + dRx, dLy*rd + dRy));
+            if (dot(n, rd) > 0.0) n = -n;                 // orient toward the camera
+        } else {
+            /* DE-gradient normal at offset scale e = 2·pixAng·t (all HDR; de/e ratios are O(1)).
+               ESCAPE-AWARE: a tap landing unescaped is inside the surface — its wrapped de is
+               garbage; use the boundary value 0. Mode 1 = 3-tap forward diff (reuse hit de as the
+               base point, −25% taps); mode 2 = legacy 4-tap tetrahedron. */
+            vec2 eH = hdrMulF(t, 2.0 * pixAng);
+            if (eH.x == 0.0) eH = de.x != 0.0 ? hdrMulF(de, 4.0) : vec2(1.0, -30.0);
+            vec2 ke = hdrRecip(eH);
+            n = vec3(0.0);
+            if (uNormalMode == 1) {
+                float base = de.x != 0.0 ? hdrToFloat(hdrMul(de, ke)) : 0.0;
+                for (int j = 0; j < 3; j++) {
+                    vec3 kv = j==0 ? vec3(1.,0.,0.) : j==1 ? vec3(0.,1.,0.) : vec3(0.,0.,1.);
+                    Hdr3 dp = Hdr3(
+                        hdrAdd(hdrMulF(t, rd.x), hdrMulF(eH, kv.x)),
+                        hdrAdd(hdrMulF(t, rd.y), hdrMulF(eH, kv.y)),
+                        hdrAdd(hdrMulF(t, rd.z), hdrMulF(eH, kv.z)));
+                    OrbitOut oo = pertOrbit(uOrbit, uOrbitLen, dp, uIters);
+                    n[j] = (oo.escaped ? hdrToFloat(hdrMul(oo.de, ke)) : 0.0) - base;
+                }
+                n = normalize(n);
+            } else {
+                for (int j = 0; j < 4; j++) {
+                    vec3 kv = j==0 ? vec3(1.,-1.,-1.) : j==1 ? vec3(-1.,-1.,1.) : j==2 ? vec3(-1.,1.,-1.) : vec3(1.,1.,1.);
+                    Hdr3 dp = Hdr3(
+                        hdrAdd(hdrMulF(t, rd.x), hdrMulF(eH, kv.x)),
+                        hdrAdd(hdrMulF(t, rd.y), hdrMulF(eH, kv.y)),
+                        hdrAdd(hdrMulF(t, rd.z), hdrMulF(eH, kv.z)));
+                    OrbitOut oo = pertOrbit(uOrbit, uOrbitLen, dp, uIters);
+                    n += kv * (oo.escaped ? hdrToFloat(hdrMul(oo.de, ke)) : 0.0);
+                }
+                n = normalize(n);
+            }
+        }
+        float ao = 1.0 - float(steps)/256.0;
+        vec3 base = surfaceColor(t, rd);
+        col = vec3(0.0);
+        if (uLightMode != 1) {                        // distant directional (modes 0 = current, 2 = both)
+            float diff = max(0.0, dot(n, uLightDir));
+            col += (0.15 + 0.85*diff) * base * (0.4+0.6*ao);
+            col += pow(max(0.0,dot(reflect(rd,n),uLightDir)),24.0)*0.3;
+        }
+        if (uLightMode != 0) {                        // CAMERA HEADLAMP: point light at the eye with
+            /* distance falloff in DEPTH-RELATIVE units — t and the falloff length L (=smoothedDist·mul,
+               passed HDR) are both at the zoom scale, so t/L is O(1). Near structure blazes, far falls
+               to shadow → the depth cue a directional light can't give at deep zoom. */
+            float a = hdrToFloat(hdrMul(t, hdrRecip(uFalloff)));
+            float atten = 1.0 / (1.0 + a*a);
+            vec3 lh = -rd;                             // direction to the light (the camera)
+            float diffH = max(0.0, dot(n, lh));
+            col += (0.04 + 0.96*diffH) * base * atten * (0.4+0.6*ao);
+            col += pow(max(0.0,dot(reflect(rd,n),lh)),32.0) * atten * 0.5;
+        }
+    } else if (farHit) {
+        vec3 p = uCamPosF + rd*tF;
+        vec3 n = normalF32(p, 2.0*pixAng*tF);
+        vec3 fc = vec3(0.62,0.55,0.78);
+        col = vec3(0.0);
+        if (uLightMode != 1) {                        // distant directional
+            float diff = max(0.0, dot(n, uLightDir));
+            col += (0.15 + 0.85*diff) * fc * 0.8;
+            col += pow(max(0.0,dot(reflect(rd,n),uLightDir)),24.0)*0.3;
+        }
+        if (uLightMode != 0) {                        // headlamp — far field is beyond it ⇒ ~dark
+            float a = min(1e9, hdrToFloat(hdrMul(hdrFromFloat(tF), hdrRecip(uFalloff))));
+            float atten = 1.0/(1.0 + a*a);
+            col += (0.04 + 0.96*max(0.0,dot(n,-rd))) * fc * atten;
+        }
+    } else if (exhausted) {
+        col = vec3(0.10,0.08,0.12);              // dark, not background — no fake holes
+    }
+    col = pow(col, vec3(0.4545));
+    o = vec4(col,1.0);
+}`;
+
+function sh(type,src){ const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s); return s; }
+function mkProg(fs){
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER,VERT));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw gl.getProgramInfoLog(p);
+  return p;
+}
+const prog = mkProg(FRAG);
+const parallelExt = gl.getExtension('KHR_parallel_shader_compile');
+let deepProg = null, deepCompileErr = '', deepReady = false;
+/* Compile the heavy deep shader WITHOUT blocking page load (≈15 s on first run — ANGLE caches the
+   binary so refreshes are instant). KHR_parallel_shader_compile builds it on a driver worker thread
+   while the f32 baseline keeps animating + a loading note shows; falls back to a one-time block if
+   the extension is absent. __deepReady stays undefined until it's ready (gate scripts wait on it). */
+function mkProgAsync(fs, cb){
+  let vs, fsObj;
+  try { vs = sh(gl.VERTEX_SHADER, VERT); } catch(e){ cb(null, String(e)); return; }
+  const p = gl.createProgram();
+  fsObj = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(fsObj, fs); gl.compileShader(fsObj);
+  gl.attachShader(p, vs); gl.attachShader(p, fsObj); gl.linkProgram(p);
+  const finish = () => {
+    if (!gl.getShaderParameter(fsObj, gl.COMPILE_STATUS)) return cb(null, gl.getShaderInfoLog(fsObj));
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) return cb(null, gl.getProgramInfoLog(p));
+    cb(p, '');
+  };
+  const poll = () => {
+    if (parallelExt && !gl.getProgramParameter(p, parallelExt.COMPLETION_STATUS_KHR)) { setTimeout(poll, 40); return; }
+    finish();
+  };
+  poll();
+}
+/* The BLA variant (#define USE_BLA) roughly doubles ANGLE→HLSL compile time (the nested
+   skip loop + 13 texelFetches), so it is compiled LAZILY on first __setBla(true) — keeping
+   page load (and every BLA-off gate) on the fast default program. */
+let deepProgBla = null, udBla = null, blaCompileErr = '';
+function ensureBlaProg(){
+  if (deepProgBla || blaCompileErr) return deepProgBla;
+  try {
+    deepProgBla = mkProg(DEEP_FRAG.replace('#version 300 es', '#version 300 es\n#define USE_BLA'));
+    udBla = makeUD(deepProgBla);
+  } catch(e){ blaCompileErr = String(e); deepProgBla = null; }
+  return deepProgBla;
+}
+
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+function bindQuad(p){
+  const loc = gl.getAttribLocation(p,'p');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+}
+const U  = n => gl.getUniformLocation(prog,n);
+const u = { res:U('uRes'), camPos:U('uCamPos'), right:U('uRight'), up:U('uUp'), fwd:U('uFwd'),
+            fov:U('uFovScale'), power:U('uPower'), iters:U('uIters'), prec:U('uPrecRatio'),
+            light:U('uLightDir'), phase:U('uPhase') };
+function makeUD(p){ const g = n => gl.getUniformLocation(p,n);
+  return { res:g('uRes'), right:g('uRight'), up:g('uUp'), fwd:g('uFwd'),
+            fov:g('uFovScale'), orbit:g('uOrbit'), len:g('uOrbitLen'), iters:g('uIters'),
+            light:g('uLightDir'), probe:g('uProbe'), probeT:g('uProbeT'),
+            pixAng:g('uPixAng'), camF:g('uCamPosF'), spreadT:g('uSpreadT'),
+            normalMode:g('uNormalMode'), bisectMax:g('uBisectMax'), jitter:g('uJitter'),
+            power:g('uPower'), powerI:g('uPowerI'), binomN:g('uBinomN'), binomN1:g('uBinomN1'), phase:g('uPhase'),
+            colorMode:g('uColorMode'), colorScale:g('uColorScale'),
+            lightMode:g('uLightMode'), falloff:g('uFalloff'),
+            bla:g('uBla'), blaTab:g('uBlaTab'), blaMaxLvl:g('uBlaMaxLvl'),
+            blaUsable:g('uBlaUsable') }; }
+let ud = null;
+/* kick off the non-blocking deep-shader compile (sets deepProg/ud + __deepReady when done).
+   The loading overlay appears ONLY if the compile is actually slow (>300 ms) — a cached refresh is
+   near-instant and never flashes it. */
+const loadTimer = setTimeout(() => {
+  if (!deepReady && !deepCompileErr) { const l = document.getElementById('loading'); if (l) l.style.display = 'flex'; }
+}, 300);
+mkProgAsync(DEEP_FRAG, (p, err) => {
+  clearTimeout(loadTimer);
+  const l = document.getElementById('loading'); if (l) l.style.display = 'none';
+  if (!p) { deepCompileErr = err; window.__deepErr = err; window.__deepReady = false; return; }
+  deepProg = p; ud = makeUD(p); deepReady = true;
+  window.__deepErr = ''; window.__deepReady = true;
+});
+/* pick the active deep program + its uniform set: the BLA variant when BLA is on and it
+   built, else the fast default. Use this everywhere a deep draw is issued. */
+function deepCtx(){
+  if (blaEnabled) { const p = ensureBlaProg(); if (p) return { p, x: udBla }; }
+  return { p: deepProg, x: ud };
+}
+
+/* ════════ [DS-SEAM] BigInt fixed-point camera + reference orbit ════════ */
+/* makeHP ported from hp-orbit.test.mjs (P ≈ 3.4 × target digits; 256 → ~77 digits) */
+function makeHP(P) {
+  const Pb = BigInt(P), SCALE = 1n << Pb;
+  const mul = (a, b) => (a * b) >> Pb;
+  const fdiv = (a, b) => (a << Pb) / b;
+  const isqrt = (n) => { if (n < 2n) return n < 0n ? 0n : n; let x = n, y = (x + 1n) >> 1n; while (y < x) { x = y; y = (x + n / x) >> 1n; } return x; };
+  const fsqrt = (a) => isqrt(a << Pb);
+  const SMALL = SCALE >> 90n;
+  const fromNum = (x) => {
+    if (x === 0) return 0n;
+    const neg = x < 0; x = Math.abs(x);
+    const dv = new DataView(new ArrayBuffer(8)); dv.setFloat64(0, x);
+    const bits = dv.getBigUint64(0);
+    const exp = Number((bits >> 52n) & 0x7ffn), mant = bits & 0xfffffffffffffn;
+    let M, E; if (exp === 0) { M = mant; E = -1074; } else { M = mant | 0x10000000000000n; E = exp - 1075; }
+    const sh = Pb + BigInt(E);
+    let v = sh >= 0n ? (M << sh) : (M >> (-sh));
+    return neg ? -v : v;
+  };
+  const toNum = (v) => Number(v) / Number(SCALE);
+  const ONE = SCALE;
+  const chebT = (x, n) => { let a = ONE, b = x; if (n === 0) return a; if (n === 1) return b; for (let k = 2; k <= n; k++) { const t = 2n * mul(x, b) - a; a = b; b = t; } return b; };
+  const chebU = (x, n) => { let a = ONE, b = 2n * x; if (n === 0) return a; if (n === 1) return b; for (let k = 2; k <= n; k++) { const u = 2n * mul(x, b) - a; a = b; b = u; } return b; };
+  const ipow = (a, n) => { let r = ONE, b = a, e = n; while (e > 0) { if (e & 1) r = mul(r, b); b = mul(b, b); e >>= 1; } return r; };
+  /* the triplex power map for general integer n, with a constant phase rotation ψ on (nθ, nφ).
+     cos/sin(nθ) come transcendental-free from Chebyshev; the phase is a rotation by constants. */
+  const P8 = (v) => {
+    const [x, y, z] = v;
+    const x2 = mul(x, x), y2 = mul(y, y), z2 = mul(z, z);
+    const r2 = x2 + y2 + z2, rho2 = x2 + y2;
+    const r = fsqrt(r2), rho = fsqrt(rho2);
+    if (r === 0n) return [0n, 0n, 0n];
+    const rN = ipow(r, nPower);
+    const cth = fdiv(z, r), sth = fdiv(rho, r);
+    let cph, sph;
+    if (rho > SMALL) { cph = fdiv(x, rho); sph = fdiv(y, rho); } else { cph = ONE; sph = 0n; }
+    let cNth = chebT(cth, nPower), sNth = mul(sth, chebU(cth, nPower - 1));
+    let cNph = chebT(cph, nPower), sNph = mul(sph, chebU(cph, nPower - 1));
+    if (phaseTheta !== 0) { const cp = fromNum(Math.cos(phaseTheta)), sp = fromNum(Math.sin(phaseTheta));
+      const c2 = mul(cNth, cp) - mul(sNth, sp), s2 = mul(sNth, cp) + mul(cNth, sp); cNth = c2; sNth = s2; }
+    if (phasePhi !== 0) { const cp = fromNum(Math.cos(phasePhi)), sp = fromNum(Math.sin(phasePhi));
+      const c2 = mul(cNph, cp) - mul(sNph, sp), s2 = mul(sNph, cp) + mul(cNph, sp); cNph = c2; sNph = s2; }
+    return [mul(mul(rN, sNth), cNph), mul(mul(rN, sNth), sNph), mul(rN, cNth)];
+  };
+  const addV = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  return { P, fromNum, toNum, P8, addV, SCALE };
+}
+const hp = makeHP(256);
+
+function hdrSplit(v) {
+  if (v === 0 || !isFinite(v)) return { m: 0, e: 0 };
+  const e = Math.floor(Math.log2(Math.abs(v)));
+  return { m: Math.fround(v * Math.pow(2, -e)), e };
+}
+
+/* Build the reference orbit AT the camera (BigInt), pack the 4-row texture +
+   f64 metadata for the CPU gate. Stops past escape (R>100) — exhaustion wrap
+   in the kernel covers pixels needing more iterations. */
+function buildRefOrbit(CHP, lenMax) {
+  const V = [CHP.slice()];
+  const Vf = [CHP.map(hp.toNum)];
+  for (let k = 0; k < lenMax - 1; k++) {
+    const nv = hp.addV(hp.P8(V[k]), CHP);
+    V.push(nv);
+    const vf = nv.map(hp.toNum);
+    Vf.push(vf);
+    if (Math.hypot(...vf) > 100) break;
+  }
+  const len = V.length;
+  const data = new Float32Array(len * 4 * 4);
+  const Rk = [], DRk = [];
+  let DR = 1;
+  for (let k = 0; k < len; k++) {
+    const v = Vf[k], R = Math.hypot(...v) || 1e-300;
+    const th = Math.acos(Math.max(-1, Math.min(1, v[2] / R))), ph = Math.atan2(v[1], v[0]);
+    const a = nPower * th + phaseTheta, b = nPower * ph + phasePhi;     // phased base angles (ψ const)
+    const Rp = Math.pow(R, nPower - 1), Rn = Rp * R;
+    const hRn = hdrSplit(Rn), hRp = hdrSplit(Rp), hDR = hdrSplit(DR);
+    const put = (row, vals) => { for (let j = 0; j < 4; j++) data[(row * len + k) * 4 + j] = vals[j]; };
+    put(0, [v[0], v[1], v[2], R]);
+    put(1, [Math.sin(a), Math.cos(a), Math.sin(b), Math.cos(b)]);
+    put(2, [hRn.m, hRn.e, hRp.m, hRp.e]);
+    put(3, [hDR.m, hDR.e, 0, 0]);
+    Rk.push(R); DRk.push(DR);
+    DR = nPower * Rp * DR + 1;
+  }
+  return { data, len, Vf, Rk, DRk };
+}
+/* ════════ BLA table build (CPU, f64) — ported VERBATIM from bla.test.mjs blaBuild ════════
+   The per-step linear op is the exact §2 Jacobian as a 3×3 + the Δdr channel; runs compose
+   (X then Y) into a binary tree of levels. Validity radii (rA,rB) are baked conservatively so
+   a run applies iff |δ| ≤ rA − rB·|δc| (escape- and Zhuoran-safe). τ=1e-5 is locked. */
+const BLA_TAU = 1e-5;
+const mat3mul=(A,B)=>{ const C=new Array(9); for(let i=0;i<3;i++)for(let j=0;j<3;j++){let s=0;for(let k=0;k<3;k++)s+=A[i*3+k]*B[k*3+j];C[i*3+j]=s;} return C; };
+const rowMat3=(g,A)=>[g[0]*A[0]+g[1]*A[3]+g[2]*A[6], g[0]*A[1]+g[1]*A[4]+g[2]*A[7], g[0]*A[2]+g[1]*A[5]+g[2]*A[8]];
+const frob=A=>{let s=0;for(const x of A)s+=x*x;return Math.sqrt(s);};
+const chebUf=(x,n)=>{ if(n<=0)return 1; let a=1,b=2*x; if(n===1)return b; for(let k=2;k<=n;k++){const u=2*x*b-a;a=b;b=u;} return b; };  // U_n(x)
+function blaBuild(O, tau){       // §2 Jacobian per step, general power n + phase ψ
+  const N=nPower, usable = O.len - 1;       // runs must end at index ≤ len-1
+  const base = [];
+  for (let k = 0; k < usable; k++) {
+    const V=O.Vf[k], R=O.Rk[k], rho=Math.hypot(V[0],V[1]);
+    const cth=V[2]/R, sth=rho/R;
+    let cp=1, sp=0; if (rho>1e-300){ cp=V[0]/rho; sp=V[1]/rho; }
+    const th=Math.acos(Math.max(-1,Math.min(1,cth))), ph=Math.atan2(V[1],V[0]);
+    const a8=N*th+phaseTheta, b8=N*ph+phasePhi;
+    const rhat=[sth*cp,sth*sp,cth], that=[cth*cp,cth*sp,-sth], phat=[-sp,cp,0];
+    const sa=Math.sin(a8),caa=Math.cos(a8),sb=Math.sin(b8),cbb=Math.cos(b8);
+    const rhp=[sa*cbb,sa*sb,caa], thp=[caa*cbb,caa*sb,-sa], php=[-sb,cbb,0];
+    const s = chebUf(cth, N-1);             // sin Nθ/sinθ — exact, pole-safe
+    const Rp=Math.pow(R,N-1), gJ=N*Rp;
+    const A=new Array(9);
+    for(let i=0;i<3;i++)for(let j=0;j<3;j++)
+      A[i*3+j]=gJ*(rhp[i]*rhat[j] + thp[i]*that[j] + s*php[i]*phat[j]);
+    const g = [rhat[0],rhat[1],rhat[2]].map(x=>x*N*(N-1)*Math.pow(R,N-2)*O.DRk[k]);
+    const B=[1,0,0,0,1,0,0,0,1];
+    const rA = R > 1.5 ? 0 : tau*R*Math.min(1,Math.abs(s))/N;
+    base.push({A, B, g, a:gJ, h:[0,0,0], rA, rB:0, nA:frob(A), nB:Math.sqrt(3)});
+  }
+  const lv=[base];
+  let maxLvl=0;
+  for(let l=1; (1<<l)<=usable; l++){
+    const prev=lv[l-1], cur=[];
+    for(let i=0; 2*i+1<prev.length; i++){
+      const X=prev[2*i], Y=prev[2*i+1];     // X first, then Y
+      const A=mat3mul(Y.A,X.A);
+      const B=mat3mul(Y.A,X.B); for(let j=0;j<9;j++)B[j]+=Y.B[j];
+      const g=rowMat3(Y.g,X.A); for(let j=0;j<3;j++)g[j]+=Y.a*X.g[j];
+      const a=Y.a*X.a;
+      const gB=rowMat3(Y.g,X.B);
+      const h=[Y.h[0]+gB[0]+Y.a*X.h[0], Y.h[1]+gB[1]+Y.a*X.h[1], Y.h[2]+gB[2]+Y.a*X.h[2]];
+      const rA = (X.rA<=0||Y.rA<=0) ? 0 : Math.min(X.rA, Y.rA/Math.max(X.nA,1e-300));
+      const rB = Math.max(X.rB, (Y.rB + X.nB)/Math.max(X.nA,1e-300));
+      cur.push({A,B,g,a,h,rA,rB,nA:frob(A),nB:frob(B)});
+    }
+    if(!cur.length) break;
+    lv.push(cur); maxLvl=l;
+  }
+  return {lv, maxLvl, usable};
+}
+/* Pack levels 1..maxLvl into an RGBA32F table (row=level, col=runIdx·14). Each run = 14
+   texels: t0=(rA,rB)|t1=(a,A0)|t2..t5=A1..A8|t6..t10.xy=B0..B8|t10.zw,t11=g0..g2|t12,t13.xy=h0..h2.
+   Every entry is hdrSplit (matrix/vector/scalar terms reach ~1e±140, overflowing plain f32). */
+function packBlaTexture(T){
+  const {lv, maxLvl, usable} = T;
+  if (maxLvl < 1 || !lv[1].length) return null;
+  const w = lv[1].length * 14, h = maxLvl + 1;       // level 1 is the widest row
+  const data = new Float32Array(w * h * 4);
+  const sp = (base, slot, val) => { const s = hdrSplit(val); data[base+slot]=s.m; data[base+slot+1]=s.e; };
+  for (let lvl = 1; lvl <= maxLvl; lvl++) {
+    const runs = lv[lvl];
+    for (let idx = 0; idx < runs.length; idx++) {
+      const r = runs[idx], A = r.A, B = r.B;
+      const base = (lvl * w + idx * 14) * 4;
+      sp(base, 0, r.rA); sp(base, 2, r.rB);
+      sp(base, 4, r.a);  sp(base, 6, A[0]);
+      sp(base, 8, A[1]); sp(base,10, A[2]); sp(base,12, A[3]); sp(base,14, A[4]);
+      sp(base,16, A[5]); sp(base,18, A[6]); sp(base,20, A[7]); sp(base,22, A[8]);
+      sp(base,24, B[0]); sp(base,26, B[1]); sp(base,28, B[2]); sp(base,30, B[3]); sp(base,32, B[4]);
+      sp(base,34, B[5]); sp(base,36, B[6]); sp(base,38, B[7]); sp(base,40, B[8]);
+      sp(base,42, r.g[0]); sp(base,44, r.g[1]); sp(base,46, r.g[2]);
+      sp(base,48, r.h[0]); sp(base,50, r.h[1]); sp(base,52, r.h[2]);
+    }
+  }
+  return { data, w, h, maxLvl, usable };
+}
+let blaEnabled = false;
+window.__setBla = (on)=>{ blaEnabled = !!on; if (blaEnabled) ensureBlaProg(); orbitDirty = true; };
+window.__blaErr = () => blaCompileErr;
+let blaTex = null, curBla = null;
+/* set the BLA uniforms + bind the table (unit 1) on the active deep program (x = its ud).
+   curBla null (shallow orbit, no levels) or BLA program absent ⇒ exact per-step path. */
+function setBlaUniforms(x){
+  if (blaEnabled && curBla && deepProgBla) {
+    gl.uniform1i(x.bla, 1);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, blaTex);
+    gl.uniform1i(x.blaTab, 1);
+    gl.uniform1i(x.blaMaxLvl, curBla.maxLvl);
+    gl.uniform1i(x.blaUsable, curBla.usable);
+    gl.activeTexture(gl.TEXTURE0);
+  } else {
+    gl.uniform1i(x.bla, 0);
+  }
+}
+/* power n + binomial coeffs + phase — set on the active deep program before each deep draw */
+function setPowerUniforms(x){
+  gl.uniform1f(x.power, nPower);
+  gl.uniform1i(x.powerI, nPower);
+  gl.uniform1fv(x.binomN, binomN);
+  gl.uniform1fv(x.binomN1, binomN1);
+  gl.uniform2f(x.phase, phaseTheta, phasePhi);
+  gl.uniform1i(x.colorMode, colorMode);
+  gl.uniform1f(x.colorScale, colorScale);
+  gl.uniform1i(x.lightMode, lightMode);
+  const Lf = hdrSplit(Math.max(smoothedDist,1e-300) * falloffMul);   // headlamp falloff length (HDR)
+  gl.uniform2f(x.falloff, Lf.m, Lf.e);
+}
+let orbitTex = null;
+function uploadOrbit(O) {
+  if (orbitTex) gl.deleteTexture(orbitTex);
+  orbitTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, orbitTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, O.len, 4, 0, gl.RGBA, gl.FLOAT, O.data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  /* BLA table (only when enabled — per-frame ~700 3×3 merges, trivial) */
+  if (blaEnabled) {
+    curBla = packBlaTexture(blaBuild(O, BLA_TAU));
+    if (curBla) {
+      if (!blaTex) blaTex = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, blaTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, curBla.w, curBla.h, 0, gl.RGBA, gl.FLOAT, curBla.data);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+  } else curBla = null;
+}
+
+/* ════════ CPU f64 perturbed march — the GROUND-TRUTH GATE (brief §4) ════════
+   Independent implementation path: plain f64 δ (JS doubles reach 1e-308, so no HDR
+   needed CPU-side) + the SAME cancellation-free §3/§8.1 math. Disagreement with
+   the GPU HDR march = a bug, not a zoom. */
+const dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2], len3=a=>Math.hypot(a[0],a[1],a[2]);
+const add3=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]], sub3=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], scl3=(a,s)=>[a[0]*s,a[1]*s,a[2]*s];
+const powm1N = (u,n) => { const c=binom(n); let p=c[n-1]; for(let k=n-2;k>=0;k--) p=p*u+c[k]; return u*p; };  // (1+u)^n−1
+function stableDeltaJS(V,d){                       // §3, residual forms (precision-ladder)
+  const NP=nPower, R=len3(V); if(R<1e-300) return [0,0,0];
+  const q=2*dot3(V,d)+dot3(d,d), r2=Math.sqrt(Math.max(R*R+q,0)), Dr=q/(r2+R);
+  const Rn=Math.pow(R,NP), dRn=Rn*Math.expm1(NP*Math.log1p(Dr/R));
+  const Dphi=Math.atan2(V[0]*d[1]-V[1]*d[0], V[0]*(V[0]+d[0])+V[1]*(V[1]+d[1]));
+  const th0=Math.acos(Math.max(-1,Math.min(1,V[2]/R))), ph0=Math.atan2(V[1],V[0]);
+  // §3c EXACT Δθ (matches the GPU kernel fix — see comment there)
+  const rho=Math.hypot(V[0],V[1]);
+  const qr2=2*(V[0]*d[0]+V[1]*d[1])+d[0]*d[0]+d[1]*d[1];
+  const rhoP=Math.sqrt(Math.max(rho*rho+qr2,0));
+  const drho=qr2/(rhoP+rho);
+  const Dth=Math.atan2(drho*V[2]-d[2]*rho, rho*rhoP+V[2]*(V[2]+d[2]));
+  const a=NP*th0+phaseTheta,b=NP*ph0+phasePhi,Da=NP*Dth,Db=NP*Dphi;   // phased base; Δ phase-invariant
+  const ca=Math.cos(a),sa=Math.sin(a),cb=Math.cos(b),sb=Math.sin(b);
+  const cA=Math.cos(Da),sA=Math.sin(Da),cB=Math.cos(Db),sB=Math.sin(Db);
+  const cAm=-sA*sA/(1+cA), cBm=-sB*sB/(1+cB);
+  const dsA=sa*cAm+ca*sA, dcA=ca*cAm-sa*sA;
+  const dsB=sb*cBm+cb*sB, dcB=cb*cBm-sb*sB;
+  const DD=[sa*dcB+dsA*cb+dsA*dcB, sa*dsB+dsA*sb+dsA*dsB, dcA], Dref=[sa*cb,sa*sb,ca];
+  return add3(scl3(DD,Rn), scl3(add3(Dref,DD),dRn));
+}
+function pertOrbitJS(O, dc, maxIter){
+  let d=dc.slice(), Ddr=0, m=0, escaped=false;
+  for(let k=0;k<maxIter;k++){
+    const V=O.Vf[m], R=O.Rk[m];
+    const q=2*dot3(V,d)+dot3(d,d), r2=Math.sqrt(Math.max(R*R+q,0)), Dr=q/(r2+R);
+    const u=Dr/R, Rp=Math.pow(R,nPower-1);
+    const Dp=Rp*powm1N(u,nPower-1);
+    Ddr=nPower*(Dp*O.DRk[m]+(Rp+Dp)*Ddr);
+    const sd=stableDeltaJS(V,d);
+    d=add3(sd,dc);
+    m++;
+    const z=add3(O.Vf[m],d);
+    if(dot3(z,z)>4){ escaped=true; break; }
+    if(dot3(z,z)<dot3(d,d) || m>=O.len-1){ d=sub3(z,O.Vf[0]); Ddr=(O.DRk[m]-1)+Ddr; m=0; }
+  }
+  const V=O.Vf[m], R=O.Rk[m];
+  const q=2*dot3(V,d)+dot3(d,d), r2=Math.sqrt(Math.max(R*R+q,1e-300));
+  return { de: 0.5*r2*Math.log(Math.max(r2,1e-300))/(O.DRk[m]+Ddr), escaped };
+}
+/* CPU referee for the march-population study (probe 3): mirrors the GPU near-field HDR
+   march EXACTLY — capped anti-arm-skip stepping + the [tPrev,t] bisection onto the n-iter
+   boundary — so tHit is comparable ray-for-ray. f64 t (JS doubles reach 1e-308, no HDR
+   needed CPU-side). Returns the surface parameter t, the hit flag, and step count. */
+function pertMarchJS(O, rd, maxIter, pixAng){
+  let t=0, tPrev=0, cap=0, steps=0, hit=false;
+  for(let st=0; st<256; st++){
+    steps=st;
+    const r=pertOrbitJS(O, scl3(rd,t), maxIter);
+    const de=r.de;
+    if(!r.escaped || de<=0){              // inside the n-iter surface — bisect onto the boundary
+      let lo=tPrev, hi=t;                  // lo = escaped side (= GPU tPrev), hi = unescaped (= GPU t)
+      for(let b=0;b<bisectMax;b++){        // match the GPU cap
+        const tm=0.5*(lo+hi);
+        const rm=pertOrbitJS(O, scl3(rd,tm), maxIter);
+        if(!rm.escaped || rm.de<=0) hi=tm; else lo=tm;
+        if((hi-lo)/Math.max(hi,1e-300) < 0.25*pixAng) break;
+      }
+      t=lo; hit=true; break;              // report the escaped-side boundary point (GPU t=tPrev)
+    }
+    if(t>0){
+      if(de/t<pixAng){ hit=true; break; }
+      if(t>1e-3) break;                   // t>T_SWITCH ⇒ far-field/background (miss for this study)
+    }
+    tPrev=t;
+    let step=de*0.85;
+    if(cap===0) cap=de*0.05;
+    const capEff=(t!==0 && t>cap)? t : cap;
+    if(step>capEff) step=capEff;
+    cap*=1.25;
+    t+=step;
+  }
+  return {t, steps, hit};
+}
+
+/* probe FBO: 1×1 RGBA32F readback of the GPU center-ray march */
+const probeTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, probeTex);
+gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,1,1,0,gl.RGBA,gl.FLOAT,null);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+const probeFbo = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, probeFbo);
+gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,probeTex,0);
+gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+/* pointwise §4 gate: de at exactly t along the center ray — GPU HDR pipeline vs the
+   independent CPU f64 referee, SAME input geometry. Well-conditioned (no march chaos). */
+function gateProbeAt(tval){
+  if(!curOrbit || !deepProg) return { t:tval, rel:NaN };
+  const {fwd,right,up}=basis();
+  const rc = pertOrbitJS(curOrbit, scl3(fwd,tval), cam.iters);
+  const D = deepCtx(), x = D.x;
+  gl.useProgram(D.p); bindQuad(D.p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, probeFbo);
+  gl.viewport(0,0,1,1);
+  gl.uniform2f(x.res, Math.max(canvas.width,2), Math.max(canvas.height,2));
+  gl.uniform3fv(x.fwd,fwd); gl.uniform3fv(x.right,right); gl.uniform3fv(x.up,up);
+  gl.uniform1f(x.fov,Math.tan(0.5*1.1));
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,orbitTex);
+  gl.uniform1i(x.orbit,0);
+  gl.uniform1i(x.len,curOrbit.len);
+  gl.uniform1i(x.iters,cam.iters);
+  gl.uniform1i(x.probe,1);
+  gl.uniform2f(x.jitter,0,0);
+  setBlaUniforms(x); setPowerUniforms(x);
+  gl.uniform1f(x.pixAng, Math.tan(0.5*1.1)/Math.max(canvas.clientHeight,2));
+  const ht=hdrSplit(tval);
+  gl.uniform2f(x.probeT, ht.m, ht.e);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  const px=new Float32Array(4);
+  gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.uniform1i(x.probe,0);
+  const gpu=px[0]*Math.pow(2,px[1]), escG=px[2]>0.5;
+  const rel=Math.abs(gpu-rc.de)/Math.max(Math.abs(rc.de),1e-300);
+  return { t:tval, gpu, cpu:rc.de, escG, escC:rc.escaped, rel };
+}
+
+/* ---------- camera + free-fly with adaptive slowdown ---------- */
+const cam = { pos:[0,0,2.6], yaw:-Math.PI/2, pitch:0, power:8, iters:14, baseSpeed:0.06 };
+let camHP = cam.pos.map(hp.fromNum);            // [DS-SEAM] authoritative position
+let smoothedDist = 1.0;
+let modeOverride = 'auto';                      // 'auto' | 'deep' | 'f32'
+let deepDiv = 4;                                // deep-mode resolution divisor
+let autoIters = true;                           // key I: scale iterations with depth
+let normalMode = 1;                             // key N: 0 screen-space (0 orbits) | 1 3-tap (default) | 2 4-tap
+                                                // screen-space is free but amplifies near-critical t-noise
+                                                // into speckle at depth; 3-tap matches the 4-tap look at −25%
+let bisectMax = 12;                             // adaptive bisection cap (was fixed 22; early-break ends most)
+let colorMode = 0, colorScale = 1.0;            // key C: 0 plain / 1 iteration / 2 orbit-trap; 9/0 scale
+let surfMul = 1.0;                              // keys F/G: how close rays reach the surface (÷pixAng).
+                                                // higher = sharper/less blobby (more march+bisection cost)
+let gateOn = true;                              // key V: live ground-truth gate (1×1 readPixels sync, 2×/s)
+let lightMode = 0, falloffMul = 4.0;            // key L: 0 directional / 1 headlamp / 2 both; T/Y falloff
+const keys = {};
+addEventListener('keydown',e=>{ keys[e.code]=true;
+  if(e.key===']'){ cam.iters=Math.min(160,cam.iters+1); orbitDirty=true; }
+  if(e.key==='['){ cam.iters=Math.max(4,cam.iters-1); orbitDirty=true; }
+  if(e.code==='KeyI') autoIters=!autoIters;
+  if(e.code==='KeyN'){ normalMode = (normalMode+1)%3; accumReset=true; }  // screen / 3-tap / 4-tap
+  if(e.code==='KeyP'){ modeOverride = modeOverride==='auto'?'deep':modeOverride==='deep'?'f32':'auto'; orbitDirty=true; }
+  if(e.code==='KeyR'){ deepDiv = deepDiv>=8?1:deepDiv*2; accumReset=true; }  // ÷1 clamped (TDR guard)
+  if(e.key==='-'||e.key==='_') setPower(nPower-1);          // power n  (−/=)
+  if(e.key==='='||e.key==='+') setPower(nPower+1);
+  if(e.key===',') setPhase(-0.06, 0);                       // phase φ  (,/.)
+  if(e.key==='.') setPhase( 0.06, 0);
+  if(e.key===';') setPhase(0, -0.06);                       // phase θ  (;/')
+  if(e.key==="'") setPhase(0,  0.06);
+  if(e.code==='KeyC'){ colorMode=(colorMode+1)%3; accumReset=true; }   // plain / iteration / orbit-trap
+  if(e.key==='9'){ colorScale=Math.max(0.05,colorScale/1.3); accumReset=true; }  // palette frequency
+  if(e.key==='0'){ colorScale=Math.min(20,colorScale*1.3); accumReset=true; }
+  if(e.code==='KeyX' && deepActive && !exporting) window.__export(2560, 16);     // hi-res PNG export
+  if(e.code==='KeyF'){ surfMul=Math.max(0.25,surfMul/1.5); accumReset=true; }    // softer (blobbier)
+  if(e.code==='KeyG'){ surfMul=Math.min(256,surfMul*1.5); accumReset=true; }     // sharper (closer to surface)
+  if(e.code==='KeyV'){ gateOn=!gateOn; if(!gateOn){ gate.relT=NaN; } }            // live gate on/off
+  if(e.code==='KeyL'){ lightMode=(lightMode+1)%3; accumReset=true; }              // directional / headlamp / both
+  if(e.code==='KeyT'){ falloffMul=Math.max(0.25,falloffMul/1.4); accumReset=true; }  // headlamp tighter
+  if(e.code==='KeyY'){ falloffMul=Math.min(64,falloffMul*1.4); accumReset=true; }    // headlamp wider
+  if(e.code==='KeyM') window.__recordToggle();                                    // record/stop+save camera path
+  if(e.key==='?') toggleAbout();                                                  // About / Credits panel
+  if(e.key==='Escape' && exporting) window.__cancelRender();                      // abort an export / path render
+  if(e.key==='Escape' && aboutEl && aboutEl.style.display==='flex') toggleAbout();
+});
+const aboutEl = document.getElementById('about');
+function toggleAbout(){ if(aboutEl) aboutEl.style.display = aboutEl.style.display==='flex' ? 'none' : 'flex'; }
+document.getElementById('aboutbtn').addEventListener('click', toggleAbout);
+aboutEl.addEventListener('click', e => { if(e.target===aboutEl || e.target.className==='x') toggleAbout(); });
+function setPower(n){
+  n = Math.max(2, Math.min(16, n|0));
+  if (n === nPower) return;
+  nPower = n; cam.power = n;
+  binomN = binomPad(nPower); binomN1 = binomPad(nPower-1);   // recompute binomial coeffs
+  orbitDirty = true;                                         // the orbit (and BLA table) depend on n
+}
+const TAU = 2*Math.PI;
+function setPhase(dth, dph){
+  phaseTheta = ((phaseTheta + dth) % TAU + TAU) % TAU;
+  phasePhi   = ((phasePhi   + dph) % TAU + TAU) % TAU;
+  orbitDirty = true;                                         // the orbit depends on phase
+}
+addEventListener('keyup',e=>{ keys[e.code]=false; });
+canvas.addEventListener('click',()=>canvas.requestPointerLock());
+addEventListener('mousemove',e=>{ if(document.pointerLockElement!==canvas) return;
+  cam.yaw   += e.movementX*0.0009;
+  cam.pitch  = Math.max(-1.55,Math.min(1.55, cam.pitch - e.movementY*0.0009));
+  accumReset = true;                                     // rotation changes the view (not the orbit)
+});
+function basis(){
+  const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch), cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
+  const fwd=[cp*cy, sp, cp*sy];
+  const right=[Math.cos(cam.yaw+Math.PI/2),0,Math.sin(cam.yaw+Math.PI/2)];
+  const up=[ right[1]*fwd[2]-right[2]*fwd[1], right[2]*fwd[0]-right[0]*fwd[2], right[0]*fwd[1]-right[1]*fwd[0] ];
+  return {fwd,right,up};
+}
+function deCPU(px,py,pz, power, N){
+    let zx=px,zy=py,zz=pz, dr=1, r=0;
+    for(let i=0;i<N;i++){
+        r=Math.hypot(zx,zy,zz);
+        if(r>2) break;
+        const rp1=Math.pow(r,power-1);
+        dr=rp1*power*dr+1;
+        let theta=Math.acos(Math.max(-1,Math.min(1,zz/r)));
+        let phi=Math.atan2(zy,zx);
+        theta=theta*power+phaseTheta; phi=phi*power+phasePhi;
+        const zr=rp1*r;
+        zx=zr*Math.sin(theta)*Math.cos(phi)+px;
+        zy=zr*Math.sin(phi)*Math.sin(theta)+py;
+        zz=zr*Math.cos(theta)+pz;
+    }
+    return 0.5*Math.log(Math.max(r,1e-8))*r/Math.max(dr,1e-20);
+}
+
+/* deCPU with escape semantics matching the kernel (for the INDEPENDENT direct check) */
+function deCPUesc(px,py,pz, N){
+    let zx=px,zy=py,zz=pz, dr=1, r=0, escaped=false, it=0;
+    for(let i=0;i<N;i++){
+        r=Math.hypot(zx,zy,zz);
+        if(r>2){ escaped=true; break; }
+        it=i+1;
+        const rp1=Math.pow(r,nPower-1);
+        dr=rp1*nPower*dr+1;
+        let theta=Math.acos(Math.max(-1,Math.min(1,zz/r)))*nPower+phaseTheta;
+        let phi=Math.atan2(zy,zx)*nPower+phasePhi;
+        const zr=rp1*r;
+        zx=zr*Math.sin(theta)*Math.cos(phi)+px;
+        zy=zr*Math.sin(phi)*Math.sin(theta)+py;
+        zz=zr*Math.cos(theta)+pz;
+    }
+    if(!escaped){ r=Math.hypot(zx,zy,zz); escaped = r>2; }
+    return { de: 0.5*Math.log(Math.max(r,1e-300))*r/dr, escaped, iters: it };
+}
+/* INDEPENDENT cross-check: GPU perturbed de vs DIRECT f64 evaluation at the explicit
+   position (no reference orbit, no §3, no HDR — nothing shared with the kernel).
+   Valid while de ≫ 1e-16 (f64 absolute floor on O(1) positions), i.e. depth ≳ 1e-13. */
+window.__directCheck = function(tvals){
+  curOrbit = buildRefOrbit(camHP, cam.iters + 2);
+  uploadOrbit(curOrbit);
+  const {fwd} = basis();
+  const cp = camHP.map(hp.toNum);
+  return tvals.map(tv => {
+    const g = gateProbeAt(tv);                                   // GPU HDR + CPU-perturbed
+    const p = [0,1,2].map(j => cp[j] + tv*fwd[j]);
+    const d = deCPUesc(p[0], p[1], p[2], cam.iters);             // direct f64 — independent
+    const rel = Math.abs(g.gpu - d.de) / Math.max(Math.abs(d.de), 1e-300);
+    return { t: tv, gpu: g.gpu, pert: g.cpu, direct: d.de, escG: g.escG, escD: d.escaped, rel };
+  });
+};
+
+/* ════════ DEEP NON-CIRCULAR REFEREE: BigInt direct march of the explicit point ════════
+   Same role as deCPUesc but in fixed-point (Chebyshev transcendental-free, isqrt+div only)
+   — NO reference orbit, NO §3, NO HDR, NO f64 position. Valid to arbitrary depth (P=256
+   ≈ 77 digits → de rel floor ~1e-27 even at depth 1e-50). Escape convention mirrors
+   deCPUesc/the kernel: r checked at loop top; dr NOT updated on the escaping iteration. */
+function hpDirectDE(posFp, maxIter){
+  const Pb = BigInt(hp.P), SCALE = hp.SCALE, ONE = SCALE;
+  const mul = (a,b) => (a*b) >> Pb;
+  const isqrt = (n) => { if (n < 2n) return n < 0n ? 0n : n; let x = n, y = (x + 1n) >> 1n; while (y < x) { x = y; y = (x + n / x) >> 1n; } return x; };
+  const fsqrt = (a) => isqrt(a << Pb);
+  const ipow = (a,n) => { let r=ONE,b=a,e=n; while(e>0){ if(e&1) r=mul(r,b); b=mul(b,b); e>>=1; } return r; };
+  const Nbig = BigInt(nPower);
+  let v = posFp.slice(), dr = ONE, escaped = false, r2 = 0n;
+  for (let i = 0; i < maxIter; i++) {
+    r2 = mul(v[0],v[0]) + mul(v[1],v[1]) + mul(v[2],v[2]);
+    if (r2 > 4n * SCALE) { escaped = true; break; }
+    const r = fsqrt(r2), rNm1 = ipow(r, nPower - 1);     // r^(n−1); dr = n·r^(n−1)·dr + 1
+    dr = Nbig * mul(rNm1, dr) + ONE;
+    v = hp.addV(hp.P8(v), posFp);
+  }
+  if (!escaped) {
+    r2 = mul(v[0],v[0]) + mul(v[1],v[1]) + mul(v[2],v[2]);
+    escaped = r2 > 4n * SCALE;
+  }
+  const r = Number(fsqrt(r2)) / Number(SCALE);
+  const drF = Number(dr) / Number(SCALE);
+  return { de: 0.5 * r * Math.log(Math.max(r, 1e-300)) / drF, escaped };
+}
+/* deep direct check: GPU perturbed de vs the BigInt direct referee at the GPU's EXACT
+   probe t (f32-mantissa HDR split — so both sides evaluate the identical point). */
+window.__directCheckHP = function(tvals){
+  curOrbit = buildRefOrbit(camHP, cam.iters + 2);
+  uploadOrbit(curOrbit);
+  const {fwd} = basis();
+  return tvals.map(tv => {
+    const h = hdrSplit(tv);
+    const tUsed = h.m * Math.pow(2, h.e);                        // the t the GPU actually sees
+    const g = gateProbeAt(tUsed);                                // GPU HDR + CPU-perturbed
+    const pos = camHP.map((c, j) => c + hp.fromNum(tUsed * fwd[j]));
+    const d = hpDirectDE(pos, cam.iters);                        // BigInt direct — independent
+    const rel = Math.abs(g.gpu - d.de) / Math.max(Math.abs(d.de), 1e-300);
+    return { t: tUsed, gpu: g.gpu, pert: g.cpu, direct: d.de, escG: g.escG, escD: d.escaped, rel };
+  });
+};
+
+/* ════════ NEAR-CRITICAL POPULATION STUDY: per-pixel escape-flag flips at view scale ════════
+   Renders a W×W grid of pertOrbit evaluations at transverse offsets δc = spread·(uv·frame)
+   (probe mode 2), then compares each pixel against the CPU f64-perturbed referee (proven ≡
+   BigInt direct). Returns flip fraction, spatial clustering, and de agreement stats —
+   decides whether deep views ship as-is (scattered fizz) or need work (structured artifacts). */
+window.__popStudy = function(spread, W){
+  curOrbit = buildRefOrbit(camHP, cam.iters + 2);
+  uploadOrbit(curOrbit);
+  const {fwd,right,up} = basis();
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,W,W,0,gl.RGBA,gl.FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  const D = deepCtx(), x = D.x;
+  gl.useProgram(D.p); bindQuad(D.p);
+  gl.viewport(0,0,W,W);
+  gl.uniform2f(x.res, W, W);
+  gl.uniform3fv(x.fwd,fwd); gl.uniform3fv(x.right,right); gl.uniform3fv(x.up,up);
+  gl.uniform1f(x.fov,Math.tan(0.5*1.1));
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,orbitTex);
+  gl.uniform1i(x.orbit,0);
+  gl.uniform1i(x.len,curOrbit.len);
+  gl.uniform1i(x.iters,cam.iters);
+  gl.uniform1i(x.probe,2);
+  gl.uniform2f(x.jitter,0,0);
+  setBlaUniforms(x); setPowerUniforms(x);
+  const hs = hdrSplit(spread);
+  gl.uniform2f(x.spreadT, hs.m, hs.e);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  const px = new Float32Array(W*W*4);
+  gl.readPixels(0,0,W,W,gl.RGBA,gl.FLOAT,px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.uniform1i(x.probe,0);
+  gl.deleteFramebuffer(fbo); gl.deleteTexture(tex);
+  const spreadUsed = hs.m * Math.pow(2, hs.e);
+  const flipGrid = new Uint8Array(W*W);
+  let flips=0, worstRel=0, rels=[], escCount=0;
+  for (let j=0;j<W;j++) for (let i=0;i<W;i++){
+    const uvx=((i+0.5)-0.5*W)/W, uvy=((j+0.5)-0.5*W)/W;
+    const cv=[uvx*right[0]+uvy*up[0], uvx*right[1]+uvy*up[1], uvx*right[2]+uvy*up[2]];
+    const r = pertOrbitJS(curOrbit, scl3(cv, spreadUsed), cam.iters);
+    const o4=(j*W+i)*4, gDe=px[o4]*Math.pow(2,px[o4+1]), gEsc=px[o4+2]>0.5;
+    if (gEsc!==r.escaped){ flips++; flipGrid[j*W+i]=1; }
+    else if (gEsc){
+      escCount++;
+      const rel=Math.abs(gDe-r.de)/Math.max(Math.abs(r.de),1e-300);
+      rels.push(rel); if(rel>worstRel) worstRel=rel;
+    }
+  }
+  let clustered=0;
+  for (let j=0;j<W;j++) for (let i=0;i<W;i++){
+    if(!flipGrid[j*W+i]) continue;
+    if((i>0&&flipGrid[j*W+i-1])||(i<W-1&&flipGrid[j*W+i+1])||(j>0&&flipGrid[(j-1)*W+i])||(j<W-1&&flipGrid[(j+1)*W+i])) clustered++;
+  }
+  rels.sort((a,b)=>a-b);
+  return { W, spread: spreadUsed, flips, flipFrac: flips/(W*W), clusterFrac: flips?clustered/flips:0,
+           escFrac: escCount/(W*W), medianRel: rels.length?rels[rels.length>>1]:NaN, worstRel };
+};
+
+/* ════════ MARCH-POPULATION STUDY (SLICE 6b): the decisive shipping metric ════════
+   probe 3 marches the FULL near-field ray per grid pixel on the GPU (real camera rays +
+   pixAng); the CPU referee (pertMarchJS, same capped stepping + bisection) marches the same
+   rays. We report median/p95 of |ΔtHit|/tHit over pixels both sides hit, plus hit-flag
+   disagreement. DECISION: p95 < pixAng ⇒ the rendered surface POSITION agrees within a
+   display pixel ⇒ 1e-50 ships visually (pointwise de noise near the boundary does NOT move
+   the bisected boundary position by a visible amount). */
+window.__marchPop = function(W){
+  curOrbit = buildRefOrbit(camHP, cam.iters + 2);
+  uploadOrbit(curOrbit);
+  const {fwd,right,up} = basis();
+  const fovScale = Math.tan(0.5*1.1);
+  const pixAng = fovScale / Math.max(canvas.clientHeight, 2);   // SAME cone the renderer uses
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,W,W,0,gl.RGBA,gl.FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  const D = deepCtx(), x = D.x;
+  gl.useProgram(D.p); bindQuad(D.p);
+  gl.viewport(0,0,W,W);
+  gl.uniform2f(x.res, W, W);
+  gl.uniform3fv(x.fwd,fwd); gl.uniform3fv(x.right,right); gl.uniform3fv(x.up,up);
+  gl.uniform1f(x.fov, fovScale);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,orbitTex);
+  gl.uniform1i(x.orbit,0);
+  gl.uniform1i(x.len,curOrbit.len);
+  gl.uniform1i(x.iters,cam.iters);
+  gl.uniform1i(x.probe,3);
+  gl.uniform1f(x.pixAng, pixAng);
+  gl.uniform1i(x.bisectMax, bisectMax);
+  gl.uniform2f(x.jitter,0,0);
+  setBlaUniforms(x); setPowerUniforms(x);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  const px = new Float32Array(W*W*4);
+  gl.readPixels(0,0,W,W,gl.RGBA,gl.FLOAT,px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.uniform1i(x.probe,0);
+  gl.deleteFramebuffer(fbo); gl.deleteTexture(tex);
+  let bothHit=0, hitDisagree=0, gHitCount=0, cHitCount=0, dts=[], worst=0;
+  const dtGrid = new Float64Array(W*W).fill(-1);
+  for (let j=0;j<W;j++) for (let i=0;i<W;i++){
+    const uvx=((i+0.5)-0.5*W)/W, uvy=((j+0.5)-0.5*W)/W;
+    const rdv=[fwd[0]+fovScale*(uvx*right[0]+uvy*up[0]),
+               fwd[1]+fovScale*(uvx*right[1]+uvy*up[1]),
+               fwd[2]+fovScale*(uvx*right[2]+uvy*up[2])];
+    const rl=Math.hypot(...rdv), rd=[rdv[0]/rl,rdv[1]/rl,rdv[2]/rl];
+    const cpu = pertMarchJS(curOrbit, rd, cam.iters, pixAng);
+    const o4=(j*W+i)*4, gT=px[o4]*Math.pow(2,px[o4+1]), gHit=px[o4+2]>0.5;
+    if (gHit) gHitCount++; if (cpu.hit) cHitCount++;
+    if (gHit !== cpu.hit){ hitDisagree++; continue; }
+    if (gHit && cpu.hit){
+      bothHit++;
+      const dt = Math.abs(gT - cpu.t) / Math.max(Math.abs(cpu.t), 1e-300);
+      dts.push(dt); dtGrid[j*W+i]=dt; if(dt>worst) worst=dt;
+    }
+  }
+  dts.sort((a,b)=>a-b);
+  const median = dts.length ? dts[dts.length>>1] : NaN;
+  const p95 = dts.length ? dts[Math.min(dts.length-1, Math.floor(0.95*dts.length))] : NaN;
+  // spatial clustering of the SUB-PIXEL-EXCEEDING pixels (structured artifact vs scattered fizz)
+  let bad=0, badClustered=0;
+  const isBad = k => dtGrid[k] >= 0 && dtGrid[k] > pixAng;
+  for (let j=0;j<W;j++) for (let i=0;i<W;i++){ const k=j*W+i; if(!isBad(k)) continue; bad++;
+    if((i>0&&isBad(k-1))||(i<W-1&&isBad(k+1))||(j>0&&isBad(k-W))||(j<W-1&&isBad(k+W))) badClustered++; }
+  return { W, pixAng, bothHit, hitDisagree, hitDisagreeFrac: hitDisagree/(W*W),
+           gHitFrac: gHitCount/(W*W), cHitFrac: cHitCount/(W*W),
+           median, p95, worst, subPixelP95: p95 < pixAng,
+           badFrac: bothHit?bad/bothHit:0, badClusterFrac: bad?badClustered/bad:0 };
+};
+
+let gate = { relT: NaN, tGPU: NaN, tCPU: NaN, when: 0 };
+window.__gate = gate;                            // smoke-test handle
+window.__cam = cam;
+window.__setCamHP = (p)=>{ camHP = p.map(hp.fromNum); cam.pos = camHP.map(hp.toNum); orbitDirty=true; };
+window.__moveAlong = (dir, dist)=>{               // exact HP move (smoke-test dive)
+  for(let j=0;j<3;j++) camHP[j] += hp.fromNum(dir[j]*dist);
+  cam.pos = camHP.map(hp.toNum); orbitDirty=true;
+};
+window.__setDiv = (d)=>{ deepDiv = d; };          // perf-matrix handle
+window.__setNormalMode = (m)=>{ normalMode = m; };  // 0 screen-space / 1 3-tap / 2 4-tap
+window.__setBisect = (n)=>{ bisectMax = n; };      // bisection iteration cap
+window.__setPower = (n)=>{ nPower=Math.max(2,Math.min(16,n|0)); cam.power=nPower; binomN=binomPad(nPower); binomN1=binomPad(nPower-1); orbitDirty=true; };
+window.__setPhase = (th,ph)=>{ phaseTheta=th||0; phasePhi=ph||0; orbitDirty=true; };
+window.__power = ()=>nPower;
+window.__setColor = (m,s)=>{ colorMode=m|0; if(s) colorScale=s; accumReset=true; };
+window.__setSurf = (m)=>{ surfMul=Math.max(0.25,Math.min(256,m||1)); accumReset=true; };  // ray-closeness ÷pixAng
+window.__setGate = (b)=>{ gateOn=!!b; if(!gateOn) gate.relT=NaN; };  // live ground-truth gate on/off
+window.__setLight = (m,f)=>{ lightMode=m|0; if(f) falloffMul=f; accumReset=true; };  // 0 dir/1 headlamp/2 both
+let forceRebuild=false;                            // measurement: simulate flight (rebuild every frame)
+window.__forceRebuild = (b)=>{ forceRebuild = !!b; };
+window.__setAccum = (b)=>{ accumEnabled = !!b; accumReset = true; };  // progressive-still toggle
+
+/* ════════ HI-RES EXPORT (TDR-safe tiled render → PNG) ════════
+   The live view is clamped to ÷div for the GPU watchdog, so it can't show full resolution. Export
+   renders the CURRENT view at an arbitrary resolution by TILING (each tile a small draw, well under
+   the ~2 s watchdog), accumulating `samples` sub-pixel-jittered passes per pixel (denoise + AA), then
+   downloads a PNG. Uses the current camera / power / phase / colour / normals. */
+let exporting = false, cancelRender = false;
+window.__exporting = () => exporting;
+window.__cancelRender = () => { cancelRender = true; };   // abort __export / __renderPath at the next row
+function showProg(html){ if(loading){ loading.style.display='flex'; loading.querySelector('.box').innerHTML=html; } }
+/* Render the CURRENT view at an arbitrary resolution by TILING (each tile a small draw ≪ the ~2 s
+   watchdog) with `samples` jittered passes (denoise+AA), and return a PNG Blob. Caller owns the
+   `exporting` flag + orbit currency. Shared by __export (one still) and __renderPath (frame sequence). */
+async function renderFrameToBlob(longEdge, samples, tile, label){
+  longEdge = longEdge || 2560; samples = Math.max(1, samples||16); tile = tile || 128;
+  const cW = Math.max(2,canvas.clientWidth), cH = Math.max(2,canvas.clientHeight), aspect = cW/cH;
+  let W = Math.round(longEdge), H = Math.round(longEdge/aspect);
+  if (aspect < 1) { H = Math.round(longEdge); W = Math.round(longEdge*aspect); }
+  W -= W % 2; H -= H % 2;
+  const {fwd,right,up} = basis();
+  const light = (()=>{const l=[0.5,0.8,0.3];const m=Math.hypot(...l);return[l[0]/m,l[1]/m,l[2]/m];})();
+  const aT = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, aT);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,W,H,0,gl.RGBA,gl.FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  const aF = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, aF);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,aT,0);
+  const D = deepCtx(), x = D.x;
+  gl.useProgram(D.p); bindQuad(D.p);
+  gl.uniform2f(x.res, W, H);
+  gl.uniform3fv(x.fwd,fwd); gl.uniform3fv(x.right,right); gl.uniform3fv(x.up,up);
+  gl.uniform1f(x.fov, Math.tan(0.5*1.1));
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, orbitTex);
+  gl.uniform1i(x.orbit,0); gl.uniform1i(x.len,curOrbit.len); gl.uniform1i(x.iters,cam.iters);
+  gl.uniform3fv(x.light,light); gl.uniform1i(x.probe,0); gl.uniform3fv(x.camF, cam.pos);
+  gl.uniform1i(x.normalMode, normalMode);
+  gl.uniform1i(x.bisectMax, Math.min(24, bisectMax + Math.max(0, Math.round(Math.log2(surfMul)))));
+  gl.uniform1f(x.pixAng, Math.tan(0.5*1.1)/H/surfMul);
+  setBlaUniforms(x); setPowerUniforms(x);
+  const tilesX = Math.ceil(W/tile), tilesY = Math.ceil(H/tile);
+  const total = tilesX*tilesY*samples; let done = 0;
+  const raf = () => new Promise(r => requestAnimationFrame(r));
+  for (let s = 0; s < samples; s++) {
+    const jx = (halton(s+1,2)-0.5)/H, jy = (halton(s+1,3)-0.5)/H;
+    gl.uniform2f(x.jitter, jx, jy);
+    if (s === 0) gl.disable(gl.BLEND);
+    else { gl.enable(gl.BLEND); gl.blendColor(0,0,0,1.0/(s+1)); gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA); }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, aF);
+    for (let ty = 0; ty < tilesY; ty++) {
+      for (let tx = 0; tx < tilesX; tx++) {
+        gl.viewport(tx*tile, ty*tile, Math.min(tile, W-tx*tile), Math.min(tile, H-ty*tile));
+        gl.drawArrays(gl.TRIANGLES,0,3); done++;
+      }
+      gl.flush(); await raf();                            // yield per row → drain GPU, TDR-safe, responsive
+      showProg(`<span class="spin">◓</span> ${label} ${W}×${H}… ${Math.round(100*done/total)}%`);
+      if (cancelRender) { gl.disable(gl.BLEND); gl.deleteFramebuffer(aF); gl.deleteTexture(aT); return { cancelled:true }; }
+    }
+  }
+  gl.disable(gl.BLEND);
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, aF);
+  const fbuf = new Float32Array(W*H*4);
+  gl.readPixels(0,0,W,H,gl.RGBA,gl.FLOAT,fbuf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(aF); gl.deleteTexture(aT);
+  const img = new Uint8ClampedArray(W*H*4);
+  for (let yy=0; yy<H; yy++) for (let xx=0; xx<W; xx++){      // flip Y (GL is bottom-up)
+    const sI=((H-1-yy)*W+xx)*4, dI=(yy*W+xx)*4;
+    img[dI]=fbuf[sI]*255; img[dI+1]=fbuf[sI+1]*255; img[dI+2]=fbuf[sI+2]*255; img[dI+3]=255;
+  }
+  const c2 = document.createElement('canvas'); c2.width=W; c2.height=H;
+  c2.getContext('2d').putImageData(new ImageData(img,W,H),0,0);
+  const blob = await new Promise(res => c2.toBlob(res, 'image/png'));
+  return { blob, W, H };
+}
+function dlBlob(blob, name){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 8000); }
+window.__export = async function(longEdge, samples, tile){
+  if (!deepReady || exporting || !curOrbit) return { error: 'not ready / no deep orbit' };
+  exporting = true; cancelRender = false;
+  try {
+    if (orbitDirty) { curOrbit = buildRefOrbit(camHP, cam.iters + 2); uploadOrbit(curOrbit); orbitDirty = false; }
+    const r = await renderFrameToBlob(longEdge, samples, tile, 'exporting');
+    if (r.cancelled) return { cancelled:true };
+    dlBlob(r.blob, `mandelbulb_n${nPower}_d${smoothedDist.toExponential(0)}_${r.W}x${r.H}.png`);
+    return { W:r.W, H:r.H };
+  } finally { exporting = false; cancelRender = false; if (loading) loading.style.display='none'; }
+};
+
+/* ════════ CAMERA-PATH RECORD / EXPORT / REPLAY ════════
+   Records the full camera + scene state per frame (camHP kept as P=256 BigInt decimal STRINGS — no
+   precision loss), downloads it as JSON, and can replay it (BigInt-lerped positions → smooth at any
+   depth). Pairs with __export for rendering a path to an image sequence. */
+let recording=false, recPath=[], recStart=0, lastCap=0;
+function capturePathFrame(now){
+  if (now - lastCap < 33) return;                          // ~30 keyframes/s
+  lastCap = now;
+  recPath.push({ t:(now-recStart)/1000, cam:camHP.map(String), yaw:cam.yaw, pitch:cam.pitch,
+    iters:cam.iters, power:nPower, phase:[phaseTheta,phasePhi], div:deepDiv, light:lightMode,
+    falloff:falloffMul, color:colorMode, cscale:colorScale, surf:surfMul });
+}
+function downloadJSON(obj, name){
+  const blob = new Blob([JSON.stringify(obj)], { type:'application/json' });
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name;
+  a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+}
+window.__recordToggle = () => {
+  if (!recording) { recording=true; recPath=[]; recStart=performance.now(); lastCap=0; }
+  else { recording=false;
+    if (recPath.length) downloadJSON({ format:'gmt-mbulb-path', P:256, fovScale:1.1, frames:recPath },
+      `mandelbulb_path_${recPath.length}f_${Date.now()}.json`);
+  }
+  return recording;
+};
+window.__lastPath = () => ({ format:'gmt-mbulb-path', P:256, fovScale:1.1, frames:recPath });
+/* apply the camera + scene state at keyframe-pair (a,b) interpolation frac. camHP is BigInt-LERPed
+   (precise at any depth); discrete state (power/colour/light) steps from the active keyframe. */
+function pathApply(a, b, frac){
+  const k = BigInt(Math.round(frac*1e9));
+  camHP = [0,1,2].map(j=>{ const A=BigInt(a.cam[j]), B=BigInt(b.cam[j]); return A + (B-A)*k/1000000000n; });
+  cam.pos = camHP.map(hp.toNum);
+  cam.yaw = a.yaw + (b.yaw-a.yaw)*frac; cam.pitch = a.pitch + (b.pitch-a.pitch)*frac;
+  cam.iters = Math.round(a.iters + (b.iters-a.iters)*frac);
+  if (a.power !== nPower) window.__setPower(a.power);
+  window.__setPhase(a.phase[0], a.phase[1]);
+  deepDiv = a.div||deepDiv; lightMode=a.light||0; falloffMul=a.falloff||4; colorMode=a.color||0;
+  colorScale=a.cscale||1; surfMul=a.surf||1; orbitDirty=true; accumReset=true;
+}
+function pathSampleAt(ks, tau){                            // set the camera/state at absolute time tau
+  if (tau >= ks[ks.length-1].t) { pathApply(ks[ks.length-1], ks[ks.length-1], 0); return; }
+  let i=0; while (i<ks.length-1 && ks[i+1].t < tau) i++;
+  const a=ks[i], b=ks[Math.min(i+1,ks.length-1)];
+  pathApply(a, b, b.t>a.t ? (tau-a.t)/(b.t-a.t) : 0);
+}
+window.__playPath = async function(data){                 // real-time replay
+  const ks = (data && data.frames) || []; if (ks.length < 1) return { error:'empty path' };
+  modeOverride = 'deep'; const tEnd = ks[ks.length-1].t, t0 = performance.now();
+  return new Promise(res => { const step = () => {
+    const tau = (performance.now()-t0)/1000;
+    if (tau >= tEnd) { pathSampleAt(ks, tEnd); res({ frames: ks.length }); return; }
+    pathSampleAt(ks, tau); requestAnimationFrame(step);
+  }; step(); });
+};
+window.__loadPathFile = () => new Promise(res => {         // file-picker → replay
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json';
+  inp.onchange=()=>{ const f=inp.files[0]; if(!f){res();return;} const r=new FileReader();
+    r.onload=()=>{ try { window.__playPath(JSON.parse(r.result)).then(res); } catch(e){ console.log('bad path',e); res(); } };
+    r.readAsText(f); };
+  inp.click();
+});
+
+/* ════════ RENDER A PATH → image sequence (ZIP of numbered PNGs, one download, no deps) ════════
+   Resamples the path at `fps` (camera BigInt-interpolated), renders each frame at export quality
+   (tiled, TDR-safe), and packs the PNGs into a single ZIP. Feed the frames to ffmpeg for video. */
+const crcTable=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n;
+  for(let k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; t[n]=c>>>0; } return t; })();
+function crc32(u8){ let c=0xFFFFFFFF; for(let i=0;i<u8.length;i++) c=(c>>>8)^crcTable[(c^u8[i])&0xFF]; return (c^0xFFFFFFFF)>>>0; }
+function makeZip(files){                                   // store method (PNGs already compressed)
+  const u16=v=>new Uint8Array([v&255,(v>>8)&255]), u32=v=>new Uint8Array([v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255]);
+  const cat=a=>{ let n=0; for(const z of a) n+=z.length; const o=new Uint8Array(n); let p=0; for(const z of a){o.set(z,p);p+=z.length;} return o; };
+  const enc=new TextEncoder(); const parts=[], central=[]; let off=0;
+  for(const f of files){ const nm=enc.encode(f.name), crc=crc32(f.data), sz=f.data.length;
+    const lfh=cat([u32(0x04034b50),u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(sz),u32(sz),u16(nm.length),u16(0),nm]);
+    parts.push(lfh, f.data);
+    central.push(cat([u32(0x02014b50),u16(20),u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(sz),u32(sz),u16(nm.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(off),nm]));
+    off += lfh.length + sz; }
+  let cdLen=0; for(const c of central){ parts.push(c); cdLen+=c.length; }
+  parts.push(cat([u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(cdLen),u32(off),u16(0)]));
+  return new Blob(parts, {type:'application/zip'});
+}
+window.__renderPath = async function(data, opts){
+  if (!deepReady || exporting) return { error:'not ready / busy' };
+  const ks = (data && data.frames) || []; if (ks.length < 1) return { error:'empty path' };
+  opts = opts || {};
+  const fps = opts.fps||30, longEdge = opts.longEdge||1280, samples = opts.samples||8, tile = opts.tile||128;
+  const dur = ks[ks.length-1].t;
+  // `frames` (total output frames, resampled evenly over the whole flight) takes precedence over
+  // fps×duration — so a long recording doesn't explode into thousands of frames. Encode at any fps.
+  const nFrames = opts.frames ? Math.max(1, opts.frames|0) : Math.max(1, Math.round(dur*fps));
+  modeOverride = 'deep'; exporting = true; cancelRender = false;
+  const files = [];
+  try {
+    for (let f = 0; f < nFrames; f++) {
+      pathSampleAt(ks, nFrames > 1 ? (f/(nFrames-1))*dur : 0);
+      curOrbit = buildRefOrbit(camHP, cam.iters + 2); uploadOrbit(curOrbit); orbitDirty = false;
+      const r = await renderFrameToBlob(longEdge, samples, tile, `frame ${f+1}/${nFrames} —`);
+      if (r.cancelled) return { cancelled:true, framesRendered:f };   // no ZIP — aborted
+      files.push({ name:`frame_${String(f).padStart(5,'0')}.png`, data:new Uint8Array(await r.blob.arrayBuffer()) });
+      showProg(`<span class="spin">◓</span> rendering path… frame ${f+1}/${nFrames}<br><small style="color:#9ab">${longEdge}px ×${samples} — __cancelRender() to abort · a ZIP will download when done</small>`);
+    }
+    showProg(`packing ${nFrames} frames…`);
+    dlBlob(makeZip(files), `mandelbulb_path_${nFrames}f_${fps}fps_${longEdge}px.zip`);
+    return { frames:nFrames, fps, longEdge, samples };
+  } finally { exporting = false; cancelRender = false; if (loading) loading.style.display='none'; }
+};
+window.__renderPathFile = (opts) => new Promise(res => {   // file-picker → render to ZIP
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json';
+  inp.onchange=()=>{ const f=inp.files[0]; if(!f){res();return;} const r=new FileReader();
+    r.onload=()=>{ try { window.__renderPath(JSON.parse(r.result), opts).then(res); } catch(e){ console.log('bad path',e); res(); } };
+    r.readAsText(f); };
+  inp.click();
+});
+
+/* resize the drawing buffer ONLY when it changes — assigning canvas.width every frame (even to the
+   same value) clears the buffer and can flicker. */
+function setCanvasSize(W,H){ if (canvas.width!==W) canvas.width=W; if (canvas.height!==H) canvas.height=H; }
+let last=performance.now(), fps=0, frameN=0, curOrbit=null, deepActive=false;
+let orbitDirty=true;                              // rebuild the reference orbit only when this is set
+let accumReset=true;                              // restart progressive accumulation (camera moved)
+/* progressive TEMPORAL accumulation when idle (TSAA-style): each idle frame re-renders the deep
+   view at the live ÷div res but with a sub-pixel Halton JITTER, and averages it into a float
+   buffer (running mean via constant-alpha blend). The average SUPERSAMPLES (anti-aliases) and —
+   the real win at depth — DENOISES the near-critical per-pixel speckle, converging visibly over
+   ~tens of frames. Every draw is a single ÷div frame ⇒ TDR-safe; sharpens on pause, snaps back to
+   live ÷div on any input. (A spatial-tile variant gave full-res but SNAPPED with no visible
+   convergence and didn't denoise — temporal is what the eye wants here.) */
+let accumEnabled=true, idleFrames=0, accumN=0;
+const IDLE_HOLD=10, ACCUM_MAX=64;                 // begin after IDLE_HOLD idle frames; cap samples
+let accumFbo=null, accumTex=null, accumW=0, accumH=0;
+const halton=(i,b)=>{ let f=1,r=0; while(i>0){ f/=b; r+=f*(i%b); i=Math.floor(i/b);} return r; };
+function ensureAccum(w,h){
+  if (accumW===w && accumH===h && accumTex) return;
+  if (accumTex){ gl.deleteTexture(accumTex); gl.deleteFramebuffer(accumFbo); }
+  accumTex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,accumTex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  accumFbo=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,accumFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,accumTex,0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  accumW=w; accumH=h;
+}
+function frame(now){
+  if (exporting) { requestAnimationFrame(frame); return; }   // hi-res export owns the GL context
+  const dt=Math.min(0.05,(now-last)/1000); last=now; fps=fps*0.9+ (1/Math.max(1e-3,dt))*0.1;
+  frameN++;
+  const {fwd,right,up}=basis();
+
+  deepActive = deepProg && (modeOverride==='deep' || (modeOverride==='auto' && smoothedDist < 1e-4));
+
+  /* auto iteration budget: the n-iter surface needs ~1.35/decade to resolve at depth.
+     Base 32 (not 24): boundary points escape at ~the budget edge, and a thin margin
+     flips escape flags (measured at 1e-50: iters=92 mismatched, 96+ agreed). */
+  if (autoIters && deepActive && smoothedDist > 0) {
+    const rec = Math.min(160, 32 + Math.ceil(1.35 * Math.max(0, -Math.log10(smoothedDist))));
+    if (rec > cam.iters) { cam.iters = rec; orbitDirty = true; }
+  }
+
+  /* --- deep mode: rebuild reference orbit AT the camera (δro ≡ 0) ONLY when the camera or
+     iteration budget changed. The BigInt rebuild + texture (+ BLA table) upload is heavy at
+     depth (iters~86 → 86 BigInt P8 evals/frame); rebuilding every frame while IDLE wasted it
+     and masked GPU-side cost. Now idle frames are pure GPU — and stills can accumulate (step 3). */
+  if (deepActive && (orbitDirty || forceRebuild || !curOrbit)) {
+    curOrbit = buildRefOrbit(camHP, cam.iters + 2);
+    uploadOrbit(curOrbit);
+    orbitDirty = false;
+    accumReset = true;                      // camera/orbit changed → restart any progressive accum
+  }
+
+  /* --- distance probe for the fly-slowdown --- */
+  let rawDist;
+  if (deepActive && curOrbit) {
+    // camera == reference, δ = 0 → de straight from reference escape quantities
+    let ke = curOrbit.len - 1;
+    for (let k = 0; k < curOrbit.len; k++) if (curOrbit.Rk[k] > 2) { ke = k; break; }
+    rawDist = Math.max(0, 0.5*curOrbit.Rk[ke]*Math.log(Math.max(curOrbit.Rk[ke],1e-300))/curOrbit.DRk[ke]);
+  } else {
+    rawDist = Math.max(0, deCPU(cam.pos[0],cam.pos[1],cam.pos[2], cam.power, cam.iters));
+  }
+  if (rawDist > smoothedDist) smoothedDist += (rawDist-smoothedDist)*(1-Math.exp(-1.2*dt));
+  else smoothedDist = rawDist;
+  const boost = keys['ShiftLeft']||keys['ShiftRight'] ? 4.0 : 1.0;
+  const speed = smoothedDist * cam.baseSpeed * boost * dt * 60;
+
+  const mv=(v,s)=>{ for(let j=0;j<3;j++) camHP[j] += hp.fromNum(v[j]*s); cam.pos = camHP.map(hp.toNum); orbitDirty = true; };
+  if(keys['KeyW']) mv(fwd, speed);   if(keys['KeyS']) mv(fwd,-speed);
+  if(keys['KeyD']) mv(right,speed);  if(keys['KeyA']) mv(right,-speed);
+  if(keys['KeyE']) mv([0,1,0], speed); if(keys['KeyQ']) mv([0,1,0],-speed);
+
+  if (recording) capturePathFrame(now);          // camera-path recording (~30 keyframes/s)
+
+  /* --- render --- */
+  /* ⚠ TDR guard: deep full-res frames at depth-scaled iteration counts exceed the ~2 s
+     Windows GPU watchdog (measured: ÷1 ≈ 1-2 fps → device reset, desktop freeze).
+     Clamp ÷1→÷2 in deep mode; below 1e-30 (iters ≥ ~73) clamp ÷2→÷4 as well. */
+  if (deepActive && deepDiv < 2) deepDiv = 2;
+  if (deepActive && deepDiv < 4 && smoothedDist < 1e-30 && smoothedDist > 0) deepDiv = 4;
+  const div = deepActive ? deepDiv : 1;
+  const w = Math.max(2, Math.floor(canvas.clientWidth  / div));
+  const h = Math.max(2, Math.floor(canvas.clientHeight / div));
+  const light = (()=>{const l=[0.5,0.8,0.3];const m=Math.hypot(...l);return[l[0]/m,l[1]/m,l[2]/m];})();
+
+  /* idle detection for progressive accumulation: any view change set accumReset (movement →
+     orbitDirty → rebuild → accumReset; rotation/keys → accumReset directly). */
+  if (accumReset) { accumReset=false; idleFrames=0; accumN=0; }
+
+  if (deepActive) {
+    const D = deepCtx(), x = D.x;
+    gl.useProgram(D.p); bindQuad(D.p);
+    gl.uniform3fv(x.fwd,fwd); gl.uniform3fv(x.right,right); gl.uniform3fv(x.up,up);
+    gl.uniform1f(x.fov,Math.tan(0.5*1.1));
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,orbitTex);
+    gl.uniform1i(x.orbit,0);
+    gl.uniform1i(x.len,curOrbit.len);
+    gl.uniform1i(x.iters,cam.iters);
+    gl.uniform3fv(x.light,light);
+    gl.uniform1i(x.probe,0);
+    setBlaUniforms(x); setPowerUniforms(x);
+    gl.uniform1f(x.pixAng, Math.tan(0.5*1.1)/Math.max(canvas.clientHeight,2)/surfMul);  // DISPLAY pixel ÷ detail
+    gl.uniform3fv(x.camF, cam.pos);             // f32 camera for the far-field hybrid segment
+    gl.uniform1i(x.normalMode, normalMode);     // 0 screen-space / 1 3-tap (default) / 2 4-tap
+    gl.uniform1i(x.bisectMax, Math.min(24, bisectMax + Math.max(0, Math.round(Math.log2(surfMul)))));  // refine more when sharper
+    gl.uniform2f(x.res,w,h);
+    const accumulating = accumEnabled && floatBlend && idleFrames >= IDLE_HOLD && accumN < ACCUM_MAX;
+    if (accumulating) {
+      /* TEMPORAL accumulation: render one jittered ÷div sample into the float buffer as a running
+         mean (constant-alpha blend, weight 1/(N+1)), then blit the average to the canvas. Each
+         draw is a single ÷div frame ⇒ TDR-safe; the average denoises the speckle + anti-aliases,
+         converging visibly over ACCUM_MAX samples. */
+      ensureAccum(w,h);
+      const jx = (halton(accumN+1,2)-0.5)/h, jy = (halton(accumN+1,3)-0.5)/h;   // ±0.5 render-pixel
+      gl.uniform2f(x.jitter, jx, jy);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, accumFbo);
+      gl.viewport(0,0,w,h);
+      if (accumN === 0) { gl.disable(gl.BLEND); }
+      else { gl.enable(gl.BLEND); gl.blendColor(0,0,0, 1.0/(accumN+1));
+             gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA); }
+      gl.drawArrays(gl.TRIANGLES,0,3);
+      gl.disable(gl.BLEND);
+      accumN++;
+      setCanvasSize(w,h);                 // display the running average (blit 1:1, CSS-upscaled)
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, accumFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.blitFramebuffer(0,0,w,h, 0,0,w,h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    } else if (accumN >= ACCUM_MAX) {
+      /* converged: keep showing the accumulated still (cheap blit) until the view changes */
+      setCanvasSize(w,h);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, accumFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.blitFramebuffer(0,0,w,h, 0,0,w,h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    } else {
+      /* live ÷div render straight to the canvas */
+      gl.uniform2f(x.jitter, 0, 0);
+      setCanvasSize(w,h);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0,0,w,h);
+      gl.drawArrays(gl.TRIANGLES,0,3);
+      idleFrames++;
+    }
+
+    /* --- ground-truth gate, ~2×/s: pointwise de at t=0 (GPU HDR vs CPU f64). The 1×1 readPixels
+       forces a GPU sync (small periodic stall) — key V toggles it off for smooth flying/recording. */
+    if (gateOn && !exporting && frameN % 30 === 0) {
+      const g = gateProbeAt(0, fwd);
+      gate.tGPU = g.gpu; gate.tCPU = g.cpu;
+      gate.relT = g.rel;
+      gate.when = now;
+    }
+  } else {
+    setCanvasSize(w,h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0,0,w,h);
+    gl.useProgram(prog); bindQuad(prog);
+    gl.uniform2f(u.res,w,h);
+    gl.uniform3fv(u.camPos,cam.pos);
+    gl.uniform3fv(u.fwd,fwd); gl.uniform3fv(u.right,right); gl.uniform3fv(u.up,up);
+    gl.uniform1f(u.fov,Math.tan(0.5*1.1));
+    gl.uniform1f(u.power,nPower); gl.uniform1f(u.iters,cam.iters);
+    gl.uniform1f(u.prec,5e-7);
+    gl.uniform3fv(u.light,light);
+    gl.uniform2f(u.phase, phaseTheta, phasePhi);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+  }
+
+  const gateOK = gate.relT < 1e-3;
+  if (loading && (deepReady || deepCompileErr)) loading.style.display = 'none';  // overlay is shown by the load timer
+  hud.innerHTML =
+    `fps        <b>${fps.toFixed(0)}</b>   mode <b>${deepActive?'DEEP (perturbation)':'f32 baseline'}</b>${deepReady?'':deepCompileErr?' <span class="warn">deep shader failed: '+deepCompileErr.slice(0,80)+'</span>':' <span class="warn">⏳ compiling deep renderer…</span>'}\n`+
+    `surf dist  <b>${smoothedDist.toExponential(2)}</b>\n`+
+    (deepActive
+      ? `gate       ${!gateOn?'<span style="color:#678">off (V)</span>':isNaN(gate.relT)?'…':`relT <b class="${gateOK?'ok':'warn'}">${gate.relT.toExponential(1)}</b> (GPU ${gate.tGPU.toExponential(3)} vs CPU ${gate.tCPU.toExponential(3)})${gateOK?' <span class="ok">✓</span>':' <span class="warn">✗ MISMATCH</span>'}`}\n`
+      : `f32 eps    ${(Math.hypot(...cam.pos)*5e-7).toExponential(2)}\n`)+
+    `power n    <b>${nPower}</b>   phase <b>${phaseTheta.toFixed(2)},${phasePhi.toFixed(2)}</b>   iters <b>${cam.iters}</b>   orbitLen ${curOrbit?curOrbit.len:'-'}   res ÷${deepActive?deepDiv:1}   normals <b>${['screen','3-tap','4-tap'][normalMode]}</b>`+
+    `   color <b>${['plain','iteration','orbit-trap'][colorMode]}</b>   detail <b>${surfMul.toFixed(2)}×</b>   light <b>${['directional','headlamp','both'][lightMode]}</b>`+
+    (deepActive&&accumEnabled?`   accum <b class="${accumN>=ACCUM_MAX?'ok':''}">${accumN>=ACCUM_MAX?`${accumN}× ✓`:accumN>0?`${accumN}×…`:'live ÷'+deepDiv}</b>`:'')+`\n`+
+    `pos        ${cam.pos.map(v=>v.toFixed(5)).join(', ')}`+
+    (recording?`   <b class="warn">● REC ${recPath.length}f</b>`:'');
+  requestAnimationFrame(frame);
+}
+const hud=document.getElementById('hud');
+const loading=document.getElementById('loading');
+
+/* ════════ scripted deep-dive (smoke test / depth milestones) ════════
+   Marches the center ray on CPU, teleports the HP camera to (t* − depth)·fwd,
+   waits a few frames, returns the gate. Lets node verify 1e-9 … 1e-50 without
+   manual flying. */
+/* one dive hop: conservative march to bracket the de-sign flip, then bisect.
+   Returns t* = distance to the (fixed-iteration) surface, resolved to f64 ulp —
+   which is why hops must shrink ×1e-3: each new reference resets the f64 t scale. */
+function diveHopJS(O, rd, maxIter, hint){
+  /* "outside" for PLACEMENT = the orbit ESCAPES within budget (escape-count test).
+     de sign is unusable here: an unescaped orbit wraps and yields garbage-negative de.
+     Step is CAPPED (starting at 1% of the caller's distance scale, growing ×1.25):
+     a raw 0.5·de step is limit-set-sized and jumps across thin n-iter arms, bracketing
+     the wrong crossing. The cap guarantees the FIRST escape→unescape flip is caught. */
+  const probe = (tv) => pertOrbitJS(O, scl3(rd, tv), maxIter);
+  let t = 0, r0 = probe(0);
+  if (!r0.escaped || r0.de <= 0) return { inside: true };
+  let de = r0.de, lo = -1, hi = -1;
+  let cap = Math.max((hint || 1e-5) * 0.01, 1e-300);
+  for (let s = 0; s < 2000; s++) {
+    const tn = t + Math.min(Math.max(de, 1e-300) * 0.5, cap);
+    const rn = probe(tn);
+    if (!rn.escaped || rn.de <= 0) { lo = t; hi = tn; break; }
+    t = tn; de = rn.de; cap *= 1.25;
+    if (t > 8) return { noSurface: true };
+  }
+  if (hi < 0) return { t };                       // never reached the set — use last t
+  for (let b = 0; b < 100; b++) {
+    const mid = 0.5 * (lo + hi);
+    const rm = probe(mid);
+    if (!rm.escaped || rm.de <= 0) hi = mid; else lo = mid;
+  }
+  return { t: lo };                               // last strictly-escaped point
+}
+window.__dive = async function(depth){
+  modeOverride = 'deep';
+  const {fwd} = basis();
+  /* stage 0: plain f64 creep from O(1) distance down to ~1e-5 above the surface
+     (perturbation is out of domain at O(1) offsets — locked shallow boundary) */
+  for (let s = 0; s < 4000; s++) {
+    const de = deCPU(cam.pos[0], cam.pos[1], cam.pos[2], cam.power, cam.iters);
+    if (de <= 1e-5) break;
+    window.__moveAlong(fwd, de * 0.6);
+    if (Math.hypot(...cam.pos) > 8) return { error: 'left scene (no surface along fwd)' };
+  }
+  /* stage 1+: perturbed hops. Each hop rebuilds the reference AT the camera, bisects
+     the surface along fwd in-domain (t* ≈ current dist ≪ 1), then moves to
+     (t* − target) with target shrinking ×1e-3 per hop until the requested depth. */
+  let back = 1e-5, placed = false, verified = false;
+  for (let hop = 0; hop < 600; hop++) {
+    const O = buildRefOrbit(camHP, cam.iters + 2);
+    const r = diveHopJS(O, fwd, cam.iters, back);
+    if (r.noSurface) return { error: 'no surface along fwd (perturbed)' };
+    if (r.inside) { window.__moveAlong(fwd, -back); back *= 2; placed = false; continue; }
+    /* verification: a fresh reference must confirm we sit ≈ depth above the boundary */
+    if (placed && r.t >= depth * 0.34 && r.t <= depth * 3) { verified = true; break; }
+    const target = Math.max(depth, r.t * 1e-3);
+    if (r.t - target > 0) window.__moveAlong(fwd, r.t - target);
+    back = target;
+    placed = (target <= depth * 1.001);
+  }
+  if (!verified) return { error: 'placement not verified (fold too thin or hops exhausted)' };
+  /* certification: pointwise de agreement at the placed depth (fresh reference) */
+  curOrbit = buildRefOrbit(camHP, cam.iters + 2);
+  uploadOrbit(curOrbit);
+  const pts = [0, depth * 0.25, depth * 0.75].map(tv => gateProbeAt(tv));
+  /* near the boundary de→0, so raw rel amplifies; the fair scale is de at t=0 (depth scale) */
+  const de0 = Math.max(Math.abs(pts[0].cpu), 1e-300);
+  let worst = -1;
+  for (const p of pts) {
+    if (p.escG !== p.escC) worst = Math.max(worst, 1);          // escape-flag mismatch = fail
+    else if (p.escG && p.escC) {
+      p.relAdj = Math.min(p.rel, Math.abs(p.gpu - p.cpu) / de0);
+      worst = Math.max(worst, p.relAdj);                        // both escaped: compare de
+    }
+    /* both unescaped: garbage-vs-garbage, not comparable — skip */
+  }
+  if (worst < 0) worst = 1;                                     // nothing comparable = placement bad
+  await new Promise(res => { const t0 = frameN; const chk = () => frameN > t0 + 35 ? res() : requestAnimationFrame(chk); chk(); });
+  return { relDE: worst, pts, dist: smoothedDist };
+};
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
