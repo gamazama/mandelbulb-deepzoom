@@ -1,8 +1,8 @@
 node_modules/
 package-lock.json
-# rendered outputs
-*.png
-*.zip
-mandelbulb_path_*.json
+# rendered outputs (root only — gallery lives in images/)
+/*.png
+/*.zip
+/mandelbulb_path_*.json
 debug/
 .DS_Store
