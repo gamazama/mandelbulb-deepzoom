@@ -97,11 +97,40 @@ __renderPathFile(opts)        // file-picker → render to a .zip
 __cancelRender()
 ```
 
-Turn the unzipped frames into a video with [ffmpeg](https://ffmpeg.org):
+### Examples
+
+```js
+// A quick 4K still of whatever you're looking at right now:
+__export(3840, 24)
+
+// Record a flight (press M to start/stop), then turn it into a 6-second 1080p
+// clip at 30 fps — that's 180 frames, no matter how long you took recording:
+__renderPath(__lastPath(), { frames: 180, longEdge: 1920, samples: 12 })
+
+// Fast draft of the same flight (low res, few samples) to check the motion:
+__renderPath(__lastPath(), { frames: 60, longEdge: 640, samples: 4 })
+
+// Render a path you saved earlier (opens a file picker), at high quality:
+__renderPathFile({ frames: 300, longEdge: 2560, samples: 24 })
+
+// Just preview a saved flight in real time, no rendering:
+__loadPathFile()
+
+// Bail out of a render in progress (or press Esc):
+__cancelRender()
+```
+
+Then turn the unzipped frames into a video with [ffmpeg](https://ffmpeg.org):
 
 ```bash
 ffmpeg -framerate 30 -i frame_%05d.png -c:v libx264 -pix_fmt yuv420p flight.mp4
 ```
+
+**Tip:** choose `frames` for the clip length you want (`seconds × fps`) and pass the same `fps` to
+ffmpeg. The flight is resampled evenly across however long you actually recorded, so a leisurely
+40-second exploration and a frantic 5-second one both become exactly the number of frames you ask for
+— `frames` is what stops a long recording becoming thousands of images. `samples` is quality per frame
+(8 is fine for motion; 16–24 for a final); `longEdge` is the long side in pixels.
 
 (Other live setters: `__setPower(n)`, `__setPhase(θ,φ)`, `__setColor(mode,scale)`,
 `__setLight(mode,falloffMul)`, `__setSurf(mul)`, `__setGate(bool)`.)
