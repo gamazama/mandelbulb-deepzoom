@@ -137,6 +137,12 @@ A path stores the **camera trajectory and geometry** (power / phase / iterations
 re-render it with different colour palettes or lighting, and an export/render always matches the look
 on screen. Renders also **preview on the canvas as they build**, tile by tile.
 
+Recordings are **smoothed for cinematic playback**: hand-jitter is low-passed off the keyframes on
+save, and playback/render interpolate the camera with a **Catmull-Rom spline** (velocity-continuous,
+exact at any depth via BigInt) instead of straight segments — so motion flows through the keyframes
+rather than stuttering at each one. (`__smoothPath(data, passes, alpha)` to re-smooth a loaded path;
+`__samplePath(data, t)` to scrub one.)
+
 (Other live setters: `__setPower(n)`, `__setPhase(θ,φ)`, `__setColor(mode,scale)`,
 `__setLight(mode,falloffMul)`, `__setSurf(mul)`, `__setGate(bool)`.)
 

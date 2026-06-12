@@ -1695,32 +1695,60 @@ function downloadJSON(obj, name){
 window.__recordToggle = () => {
   if (!recording) { recording=true; recPath=[]; recStart=performance.now(); lastCap=0; }
   else { recording=false;
+    smoothPath(recPath);                                   // de-jitter before saving / using
     if (recPath.length) downloadJSON({ format:'gmt-mbulb-path', P:256, fovScale:1.1, frames:recPath },
       `mandelbulb_path_${recPath.length}f_${Date.now()}.json`);
   }
   return recording;
 };
 window.__lastPath = () => ({ format:'gmt-mbulb-path', P:256, fovScale:1.1, frames:recPath });
-/* apply the camera + scene state at keyframe-pair (a,b) interpolation frac. camHP is BigInt-LERPed
-   (precise at any depth); discrete state (power/colour/light) steps from the active keyframe. */
-function pathApply(a, b, frac){
-  const k = BigInt(Math.round(frac*1e9));
-  camHP = [0,1,2].map(j=>{ const A=BigInt(a.cam[j]), B=BigInt(b.cam[j]); return A + (B-A)*k/1000000000n; });
+window.__smoothPath = (data, passes, alpha) => {           // re-smooth a path object (e.g. a loaded one)
+  smoothPath((data&&data.frames)||[], passes, alpha); return data; };
+window.__samplePath = (data, tau) => { const ks=(data&&data.frames)||[]; if(!ks.length) return null;
+  pathSampleAt(ks, tau); return cam.pos.slice(); };          // scrub a path to time tau → camera pos
+/* CATMULL-ROM interpolation through 4 keyframes (p0..p3, local param u∈[0,1] on segment p1→p2):
+   velocity-continuous (C1), so motion flows smoothly THROUGH keyframes instead of the kinked,
+   stuttering segments linear lerp gives. camHP stays exact-ish at any depth — the spline runs on
+   the BigInt DELTAS from p1 (weights fixed-point ×1e15), so the huge absolute position never loses
+   bits. The LOOK (colour/lighting/detail) is your current live settings, not the recorded ones. */
+const SW_CR = 1000000000000000n;
+function pathApplyCR(p0, p1, p2, p3, u){
+  const u2=u*u, u3=u2*u;
+  const w0=-0.5*u+u2-0.5*u3, w2=0.5*u+2.0*u2-1.5*u3, w3=-0.5*u2+0.5*u3, w1=1.0-w0-w2-w3;
+  const q = x => BigInt(Math.round(x*1e15));
+  const W0=q(w0), W2=q(w2), W3=q(w3);
+  camHP = [0,1,2].map(j=>{ const c0=BigInt(p0.cam[j]),c1=BigInt(p1.cam[j]),c2=BigInt(p2.cam[j]),c3=BigInt(p3.cam[j]);
+    return c1 + (W0*(c0-c1) + W2*(c2-c1) + W3*(c3-c1)) / SW_CR; });
   cam.pos = camHP.map(hp.toNum);
-  cam.yaw = a.yaw + (b.yaw-a.yaw)*frac; cam.pitch = a.pitch + (b.pitch-a.pitch)*frac;
-  cam.iters = Math.round(a.iters + (b.iters-a.iters)*frac);
-  if (a.power !== nPower) window.__setPower(a.power);
-  window.__setPhase(a.phase[0], a.phase[1]);
-  // NOTE: a path carries the camera trajectory + GEOMETRY (power/phase/iters) only. The LOOK
-  // (colour / lighting / detail / normals) is whatever you have set live — so a render uses YOUR
-  // current settings, not the ones that happened to be on while recording.
+  cam.yaw   = w0*p0.yaw   + w1*p1.yaw   + w2*p2.yaw   + w3*p3.yaw;
+  cam.pitch = w0*p0.pitch + w1*p1.pitch + w2*p2.pitch + w3*p3.pitch;
+  cam.iters = Math.round(p1.iters + (p2.iters-p1.iters)*u);
+  if (p1.power !== nPower) window.__setPower(p1.power);
+  window.__setPhase(p1.phase[0], p1.phase[1]);
   orbitDirty=true; accumReset=true;
 }
 function pathSampleAt(ks, tau){                            // set the camera/state at absolute time tau
-  if (tau >= ks[ks.length-1].t) { pathApply(ks[ks.length-1], ks[ks.length-1], 0); return; }
-  let i=0; while (i<ks.length-1 && ks[i+1].t < tau) i++;
-  const a=ks[i], b=ks[Math.min(i+1,ks.length-1)];
-  pathApply(a, b, b.t>a.t ? (tau-a.t)/(b.t-a.t) : 0);
+  const n = ks.length;
+  if (n === 1 || tau >= ks[n-1].t) { const e=ks[n-1]; pathApplyCR(e,e,e,e,0); return; }
+  let i=0; while (i<n-1 && ks[i+1].t < tau) i++;
+  const u = ks[i+1].t > ks[i].t ? (tau-ks[i].t)/(ks[i+1].t-ks[i].t) : 0;
+  pathApplyCR(ks[Math.max(0,i-1)], ks[i], ks[i+1], ks[Math.min(n-1,i+2)], u);
+}
+/* light low-pass on the recorded keyframes to take the hand-jitter off the path (position + look
+   direction). Endpoints fixed; a few mild passes — enough to de-jitter without cutting corners. */
+function smoothPath(ks, passes=2, alpha=0.4){
+  if (ks.length < 3) return ks;
+  const A = BigInt(Math.round(alpha*1e6));
+  for (let p=0; p<passes; p++){
+    const cam0 = ks.map(k=>k.cam.map(BigInt)), yaw0 = ks.map(k=>k.yaw), pit0 = ks.map(k=>k.pitch);
+    for (let i=1; i<ks.length-1; i++){
+      ks[i].cam = [0,1,2].map(j=>{ const avg=(cam0[i-1][j]+cam0[i+1][j])/2n;
+        return (cam0[i][j] + A*(avg-cam0[i][j])/1000000n).toString(); });
+      ks[i].yaw   = yaw0[i] + alpha*((yaw0[i-1]+yaw0[i+1])/2 - yaw0[i]);
+      ks[i].pitch = pit0[i] + alpha*((pit0[i-1]+pit0[i+1])/2 - pit0[i]);
+    }
+  }
+  return ks;
 }
 window.__playPath = async function(data){                 // real-time replay
   const ks = (data && data.frames) || []; if (ks.length < 1) return { error:'empty path' };
