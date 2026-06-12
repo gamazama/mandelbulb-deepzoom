@@ -1614,6 +1614,14 @@ async function renderFrameToBlob(longEdge, samples, tile, label){
   gl.uniform1i(x.bisectMax, Math.min(24, bisectMax + Math.max(0, Math.round(Math.log2(surfMul)))));
   gl.uniform1f(x.pixAng, Math.tan(0.5*1.1)/H/surfMul);
   setBlaUniforms(x); setPowerUniforms(x);
+  // headlamp falloff must track THIS frame's depth (setPowerUniforms used the frozen smoothedDist,
+  // wrong for a moving path). Derive the surface-distance scale from the reference orbit at the camera.
+  { let ke = curOrbit.len-1; for (let k=0;k<curOrbit.len;k++) if (curOrbit.Rk[k] > 2) { ke=k; break; }
+    const dScale = Math.max(1e-300, 0.5*curOrbit.Rk[ke]*Math.log(Math.max(curOrbit.Rk[ke],1e-300))/curOrbit.DRk[ke]);
+    const Lf = hdrSplit(dScale*falloffMul); gl.uniform2f(x.falloff, Lf.m, Lf.e); }
+  // live on-screen preview: show the render building up on the canvas (blit each row below)
+  if (loading) loading.style.background = 'transparent';   // let the preview show behind the % box
+  setCanvasSize(Math.max(2,canvas.clientWidth), Math.max(2,canvas.clientHeight));
   const tilesX = Math.ceil(W/tile), tilesY = Math.ceil(H/tile);
   const total = tilesX*tilesY*samples; let done = 0;
   const raf = () => new Promise(r => requestAnimationFrame(r));
@@ -1628,6 +1636,10 @@ async function renderFrameToBlob(longEdge, samples, tile, label){
         gl.viewport(tx*tile, ty*tile, Math.min(tile, W-tx*tile), Math.min(tile, H-ty*tile));
         gl.drawArrays(gl.TRIANGLES,0,3); done++;
       }
+      // live preview: scale the in-progress float buffer onto the canvas, then restore aF for drawing
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, aF); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.blitFramebuffer(0,0,W,H, 0,0,canvas.width,canvas.height, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, aF);
       gl.flush(); await raf();                            // yield per row → drain GPU, TDR-safe, responsive
       showProg(`<span class="spin">◓</span> ${label} ${W}×${H}… ${Math.round(100*done/total)}%`);
       if (cancelRender) { gl.disable(gl.BLEND); gl.deleteFramebuffer(aF); gl.deleteTexture(aT); return { cancelled:true }; }
@@ -1660,7 +1672,7 @@ window.__export = async function(longEdge, samples, tile){
     if (r.cancelled) return { cancelled:true };
     dlBlob(r.blob, `mandelbulb_n${nPower}_d${smoothedDist.toExponential(0)}_${r.W}x${r.H}.png`);
     return { W:r.W, H:r.H };
-  } finally { exporting = false; cancelRender = false; if (loading) loading.style.display='none'; }
+  } finally { exporting = false; cancelRender = false; if (loading) { loading.style.display='none'; loading.style.background=''; } }
 };
 
 /* ════════ CAMERA-PATH RECORD / EXPORT / REPLAY ════════
@@ -1699,8 +1711,10 @@ function pathApply(a, b, frac){
   cam.iters = Math.round(a.iters + (b.iters-a.iters)*frac);
   if (a.power !== nPower) window.__setPower(a.power);
   window.__setPhase(a.phase[0], a.phase[1]);
-  deepDiv = a.div||deepDiv; lightMode=a.light||0; falloffMul=a.falloff||4; colorMode=a.color||0;
-  colorScale=a.cscale||1; surfMul=a.surf||1; orbitDirty=true; accumReset=true;
+  // NOTE: a path carries the camera trajectory + GEOMETRY (power/phase/iters) only. The LOOK
+  // (colour / lighting / detail / normals) is whatever you have set live — so a render uses YOUR
+  // current settings, not the ones that happened to be on while recording.
+  orbitDirty=true; accumReset=true;
 }
 function pathSampleAt(ks, tau){                            // set the camera/state at absolute time tau
   if (tau >= ks[ks.length-1].t) { pathApply(ks[ks.length-1], ks[ks.length-1], 0); return; }
@@ -1767,7 +1781,7 @@ window.__renderPath = async function(data, opts){
     showProg(`packing ${nFrames} frames…`);
     dlBlob(makeZip(files), `mandelbulb_path_${nFrames}f_${fps}fps_${longEdge}px.zip`);
     return { frames:nFrames, fps, longEdge, samples };
-  } finally { exporting = false; cancelRender = false; if (loading) loading.style.display='none'; }
+  } finally { exporting = false; cancelRender = false; if (loading) { loading.style.display='none'; loading.style.background=''; } }
 };
 window.__renderPathFile = (opts) => new Promise(res => {   // file-picker → render to ZIP
   const inp=document.createElement('input'); inp.type='file'; inp.accept='.json';

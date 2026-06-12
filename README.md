@@ -132,6 +132,11 @@ ffmpeg. The flight is resampled evenly across however long you actually recorded
 — `frames` is what stops a long recording becoming thousands of images. `samples` is quality per frame
 (8 is fine for motion; 16–24 for a final); `longEdge` is the long side in pixels.
 
+A path stores the **camera trajectory and geometry** (power / phase / iterations) only — the **look**
+(colour, lighting, surface detail) is whatever you have set live. So you can record a flight once and
+re-render it with different colour palettes or lighting, and an export/render always matches the look
+on screen. Renders also **preview on the canvas as they build**, tile by tile.
+
 (Other live setters: `__setPower(n)`, `__setPhase(θ,φ)`, `__setColor(mode,scale)`,
 `__setLight(mode,falloffMul)`, `__setSurf(mul)`, `__setGate(bool)`.)
 
