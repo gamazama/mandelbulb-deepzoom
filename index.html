@@ -96,22 +96,43 @@
                   text-shadow:0 0 4px #000; }
   #loading .spin { display:inline-block; animation:sp 1s linear infinite; }
   @keyframes sp { to { transform:rotate(360deg); } }
-  #aboutbtn { position:fixed; top:8px; right:10px; color:#9ab; cursor:pointer; user-select:none;
-              background:rgba(0,0,0,.35); padding:3px 8px; border-radius:4px; font-size:12px; }
-  #aboutbtn:hover { color:#cfe; }
-  #about { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+  #topbar { position:fixed; top:8px; right:10px; display:flex; gap:6px; z-index:9; }
+  #topbar div { color:#9ab; cursor:pointer; user-select:none; background:rgba(0,0,0,.4);
+                padding:3px 9px; border-radius:4px; font-size:12px; }
+  #topbar div:hover { color:#cfe; background:rgba(20,30,38,.7); }
+  .modal { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
            background:rgba(0,0,0,.72); z-index:10; }
-  #about .panel { max-width:760px; max-height:86vh; overflow:auto; background:#0c0f12; color:#bcd;
-                  border:1px solid #2a3a44; border-radius:8px; padding:22px 26px; line-height:1.55;
+  .modal .panel { max-width:760px; max-height:86vh; overflow:auto; background:#0c0f12; color:#bcd;
+                  border:1px solid #2a3a44; border-radius:8px; padding:20px 24px; line-height:1.5;
                   box-shadow:0 8px 40px rgba(0,0,0,.6); }
-  #about h1 { font-size:15px; color:#cfe; margin:0 0 4px; letter-spacing:.04em; }
-  #about h2 { font-size:12px; color:#7fd1b0; margin:18px 0 5px; letter-spacing:.08em; text-transform:uppercase; }
-  #about p, #about li { font-size:12.5px; color:#aab8c2; margin:4px 0; }
-  #about b { color:#e8eef2; font-weight:600; }
-  #about ul { margin:4px 0; padding-left:18px; }
-  #about a { color:#7fd1b0; }
-  #about .sub { color:#677; font-size:11px; }
-  #about .x { float:right; color:#677; cursor:pointer; font-size:13px; }
+  .modal h1 { font-size:15px; color:#cfe; margin:0 0 4px; letter-spacing:.04em; }
+  .modal h2 { font-size:11px; color:#7fd1b0; margin:16px 0 6px; letter-spacing:.08em; text-transform:uppercase; }
+  .modal p, .modal li { font-size:12.5px; color:#aab8c2; margin:4px 0; }
+  .modal b { color:#e8eef2; font-weight:600; }
+  .modal ul { margin:4px 0; padding-left:18px; }
+  .modal a { color:#7fd1b0; }
+  .modal .sub { color:#677; font-size:11px; }
+  .modal .x { float:right; color:#677; cursor:pointer; font-size:13px; }
+  /* control rows (sliders + segmented buttons + toggles) */
+  #controls .panel, #render .panel { width:380px; }
+  .ctl { display:flex; align-items:center; gap:10px; margin:7px 0; font-size:12px; }
+  .ctl > .lbl { flex:0 0 78px; color:#9ab; }
+  .ctl > .val { flex:0 0 52px; text-align:right; color:#cfe; font-variant-numeric:tabular-nums; }
+  .ctl input[type=range] { flex:1; accent-color:#7fd1b0; height:18px; }
+  .seg { display:flex; gap:4px; flex:1; }
+  .seg button { flex:1; background:#16202a; color:#9ab; border:1px solid #243440; border-radius:4px;
+                padding:4px 0; font:inherit; font-size:11px; cursor:pointer; }
+  .seg button.on { background:#1d4d3f; color:#cfe; border-color:#2f7d65; }
+  .seg button:hover { color:#cfe; }
+  .btn { background:#16202a; color:#cde; border:1px solid #2a3a44; border-radius:5px; padding:7px 12px;
+         font:inherit; font-size:12px; cursor:pointer; margin:3px 5px 3px 0; }
+  .btn:hover { background:#1d4d3f; border-color:#2f7d65; }
+  .btn.go { background:#1d4d3f; border-color:#2f7d65; color:#dff; }
+  .btn:disabled { opacity:.4; cursor:default; }
+  #render input[type=number] { width:72px; background:#0a0d10; color:#cfe; border:1px solid #243440;
+                               border-radius:4px; padding:4px 6px; font:inherit; }
+  #render .row { display:flex; align-items:center; gap:10px; margin:5px 0; font-size:12px; }
+  #render .row label { flex:1; color:#9ab; }
 </style>
 </head>
 <body>
@@ -119,8 +140,47 @@
 <div id="loading"><div class="box"><span class="spin">◓</span> compiling deep renderer…<br>
 <small style="color:#9ab">first load only (~15&thinsp;s) — flying the f32 baseline meanwhile</small></div></div>
 <div id="hud"></div>
-<div id="aboutbtn">ⓘ about / credits</div>
-<div id="about"><div class="panel">
+<div id="topbar">
+  <div id="ctlbtn">⚙ controls</div>
+  <div id="renderbtn">🎬 render</div>
+  <div id="aboutbtn">ⓘ about</div>
+</div>
+<div id="controls" class="modal"><div class="panel">
+  <span class="x">✕</span>
+  <h1>Controls</h1>
+  <p class="sub">Changes apply live. (Keyboard shortcuts still work too.)</p>
+  <div id="ctlbody"></div>
+  <h2>Keyboard shortcuts</h2>
+  <p class="sub">WASD + Q/E fly · Shift boost · mouse look · Esc release &nbsp;·&nbsp; [ ] iters · I auto-iters ·
+  P mode · R res · N normals &nbsp;·&nbsp; −/= power · ,/. phase φ · ;/' phase θ &nbsp;·&nbsp;
+  C colour · 9/0 palette · F/G detail · L light · T/Y falloff &nbsp;·&nbsp; V gate · X export · M record · ? about</p>
+</div></div>
+<div id="render" class="modal"><div class="panel">
+  <span class="x">✕</span>
+  <h1>Render &amp; Export</h1>
+  <p class="sub" id="rstatus">…</p>
+  <h2>Still image (PNG)</h2>
+  <div class="row"><label>resolution (long edge)</label><input id="r_res" type="number" value="2560" min="256" step="64"></div>
+  <div class="row"><label>samples (quality)</label><input id="r_samp" type="number" value="16" min="1" max="128"></div>
+  <button class="btn go" id="r_export">Export PNG</button>
+  <h2>Camera path</h2>
+  <button class="btn" id="r_rec">● Record</button>
+  <button class="btn" id="r_load">Load…</button>
+  <button class="btn" id="r_save">Save</button>
+  <button class="btn" id="r_play">▶ Preview</button>
+  <div class="row"><label>smoothing — passes</label><input id="r_sp" type="number" value="2" min="0" max="12"></div>
+  <div class="row"><label>strength (0–1)</label><input id="r_sa" type="number" value="0.4" min="0" max="1" step="0.05"></div>
+  <button class="btn" id="r_smooth">Smooth path</button>
+  <h2>Render path → video frames (.zip)</h2>
+  <div class="row"><label>frames</label><input id="r_frames" type="number" value="180" min="1"></div>
+  <div class="row"><label>resolution (long edge)</label><input id="r_pres" type="number" value="1920" min="256" step="64"></div>
+  <div class="row"><label>samples / frame</label><input id="r_psamp" type="number" value="12" min="1" max="64"></div>
+  <button class="btn go" id="r_render">Render → ZIP</button>
+  <button class="btn" id="r_cancel">✖ Cancel</button>
+  <p class="sub">frames = seconds × fps. Encode the unzipped PNGs:<br>
+  <code style="color:#9ab">ffmpeg -framerate 30 -i frame_%05d.png -c:v libx264 -pix_fmt yuv420p out.mp4</code></p>
+</div></div>
+<div id="about" class="modal"><div class="panel">
   <span class="x">✕ close (?)</span>
   <h1>Mandelbulb Perturbation Deep-Zoom</h1>
   <p class="sub">Real-time fly-navigation of the 3D Mandelbulb to ~1e-50 surface distance on a consumer
@@ -178,9 +238,8 @@
   this stands on. &nbsp;Source &amp; verification harness:
   <a href="https://github.com/gamazama/mandelbulb-deepzoom">github.com/gamazama/mandelbulb-deepzoom</a></p>
 </div></div>
-<div id="help">click to capture mouse · WASD move · Q/E down/up · SHIFT boost · mouse look · ESC release
-[ ] iterations · I auto-iters · P mode auto/deep/f32 · R deep-res divisor · N normals
-−/= power n · ,/. phase φ · ;/' phase θ · C color · 9/0 palette · F/G detail · L light · T/Y falloff · V gate · X export · M record path · ? about</div>
+<div id="help">click to capture mouse · WASD + Q/E fly · SHIFT boost · mouse look · ESC release
+<span style="color:#9ab">⚙ controls</span> for all settings + shortcuts · <span style="color:#9ab">🎬 render</span> to export &amp; record</div>
 <script>
 /* =============================================================================
    GOLDEN PROBLEM HARNESS — Mandelbulb PERTURBATION DEEP-ZOOM RENDERER (Fable)
@@ -1294,6 +1353,79 @@ const aboutEl = document.getElementById('about');
 function toggleAbout(){ if(aboutEl) aboutEl.style.display = aboutEl.style.display==='flex' ? 'none' : 'flex'; }
 document.getElementById('aboutbtn').addEventListener('click', toggleAbout);
 aboutEl.addEventListener('click', e => { if(e.target===aboutEl || e.target.className==='x') toggleAbout(); });
+
+/* ════════ INTERACTIVE UI PANELS — the keyboard shortcuts as buttons/sliders ════════ */
+const $id = id => document.getElementById(id);
+const CTLS = [
+  {t:'seg', l:'mode',     g:()=>modeOverride, opts:[['auto','auto'],['deep','deep'],['f32','f32']], s:v=>{modeOverride=v; orbitDirty=true;}},
+  {t:'seg', l:'res',      g:()=>deepDiv, opts:[['÷8',8],['÷4',4],['÷2',2]], s:v=>{deepDiv=v; accumReset=true;}},
+  {t:'rng', l:'iters',    g:()=>cam.iters, min:4,max:160,step:1, s:v=>{cam.iters=v; orbitDirty=true;}},
+  {t:'tog', l:'auto-iters', g:()=>autoIters, s:v=>{autoIters=v;}},
+  {t:'rng', l:'power n',  g:()=>nPower, min:2,max:16,step:1, s:v=>window.__setPower(v)},
+  {t:'rng', l:'phase φ',  g:()=>phasePhi, min:0,max:6.2832,step:0.02, fmt:v=>v.toFixed(2), s:v=>{phasePhi=v; orbitDirty=true;}},
+  {t:'rng', l:'phase θ',  g:()=>phaseTheta, min:0,max:6.2832,step:0.02, fmt:v=>v.toFixed(2), s:v=>{phaseTheta=v; orbitDirty=true;}},
+  {t:'seg', l:'normals',  g:()=>normalMode, opts:[['screen',0],['3-tap',1],['4-tap',2]], s:v=>{normalMode=v; accumReset=true;}},
+  {t:'seg', l:'colour',   g:()=>colorMode, opts:[['plain',0],['iter',1],['trap',2]], s:v=>{colorMode=v; accumReset=true;}},
+  {t:'rng', l:'palette',  g:()=>colorScale, min:0.1,max:8,step:0.1, fmt:v=>v.toFixed(1), s:v=>{colorScale=v; accumReset=true;}},
+  {t:'rng', l:'detail',   g:()=>surfMul, min:0.25,max:32,step:0.25, fmt:v=>v.toFixed(2), s:v=>{surfMul=v; accumReset=true;}},
+  {t:'seg', l:'lighting', g:()=>lightMode, opts:[['direct',0],['lamp',1],['both',2]], s:v=>{lightMode=v; accumReset=true;}},
+  {t:'rng', l:'falloff',  g:()=>falloffMul, min:0.5,max:32,step:0.5, fmt:v=>v.toFixed(1), s:v=>{falloffMul=v; accumReset=true;}},
+  {t:'tog', l:'gate',     g:()=>gateOn, s:v=>{gateOn=v; if(!v) gate.relT=NaN;}},
+];
+(function buildControls(){
+  const body = $id('ctlbody');
+  for (const c of CTLS){
+    const row=document.createElement('div'); row.className='ctl';
+    const lbl=document.createElement('span'); lbl.className='lbl'; lbl.textContent=c.l; row.appendChild(lbl);
+    if (c.t==='rng'){
+      const inp=document.createElement('input'); inp.type='range'; inp.min=c.min; inp.max=c.max; inp.step=c.step;
+      const val=document.createElement('span'); val.className='val';
+      inp.oninput=()=>{ const x=parseFloat(inp.value); c.s(x); val.textContent=(c.fmt||(y=>y))(x); };
+      c._inp=inp; c._val=val; row.appendChild(inp); row.appendChild(val);
+    } else if (c.t==='seg'){
+      const seg=document.createElement('div'); seg.className='seg';
+      c._btns=c.opts.map(([txt,v])=>{ const bn=document.createElement('button'); bn.textContent=txt;
+        bn.onclick=()=>{ c.s(v); syncControls(); }; seg.appendChild(bn); return bn; });
+      row.appendChild(seg);
+    } else if (c.t==='tog'){
+      const seg=document.createElement('div'); seg.className='seg';
+      const off=document.createElement('button'), on=document.createElement('button');
+      off.textContent='off'; on.textContent='on';
+      off.onclick=()=>{ c.s(false); syncControls(); }; on.onclick=()=>{ c.s(true); syncControls(); };
+      c._btns=[off,on]; c._vals=[false,true]; seg.appendChild(off); seg.appendChild(on); row.appendChild(seg);
+    }
+    body.appendChild(row);
+  }
+})();
+function syncControls(){
+  for (const c of CTLS){ const v=c.g();
+    if (c.t==='rng'){ if(c._inp){ c._inp.value=v; c._val.textContent=(c.fmt||(y=>y))(v); } }
+    else if (c.t==='seg'){ c._btns.forEach((bn,i)=>bn.classList.toggle('on', c.opts[i][1]===v)); }
+    else if (c.t==='tog'){ c._btns.forEach((bn,i)=>bn.classList.toggle('on', c._vals[i]===v)); }
+  }
+}
+const ctlEl=$id('controls'), renderEl=$id('render'); let controlsOpen=false;
+$id('ctlbtn').addEventListener('click', ()=>{ const open=ctlEl.style.display==='flex'; ctlEl.style.display=open?'none':'flex'; controlsOpen=!open; if(controlsOpen) syncControls(); });
+ctlEl.addEventListener('click', e=>{ if(e.target===ctlEl||e.target.className==='x'){ ctlEl.style.display='none'; controlsOpen=false; } });
+setInterval(()=>{ if(controlsOpen) syncControls(); }, 150);    // reflect key-driven changes live
+
+/* ── render / export panel ── */
+let uiPath=null;
+function curPath(){ return uiPath || window.__lastPath(); }
+function pathInfo(p){ const n=p&&p.frames?p.frames.length:0; return n ? `path: ${n} keyframes, ${p.frames[n-1].t.toFixed(1)} s` : 'no path yet — Record or Load one'; }
+function rstat(m){ const e=$id('rstatus'); if(e) e.textContent=m; }
+function recLabel(){ $id('r_rec').textContent = (window.__recording&&window.__recording()) ? '■ Stop & save' : '● Record'; }
+$id('renderbtn').addEventListener('click', ()=>{ const open=renderEl.style.display==='flex'; renderEl.style.display=open?'none':'flex'; if(!open){ recLabel(); rstat(pathInfo(curPath())); } });
+renderEl.addEventListener('click', e=>{ if(e.target===renderEl||e.target.className==='x') renderEl.style.display='none'; });
+$id('r_export').onclick=()=>{ renderEl.style.display='none'; window.__export(+$id('r_res').value, +$id('r_samp').value); };
+$id('r_rec').onclick=()=>{ const rec=window.__recordToggle(); recLabel(); if(!rec){ uiPath=window.__lastPath(); rstat(pathInfo(uiPath)); } else rstat('recording — fly, then Stop'); };
+$id('r_load').onclick=async()=>{ const d=await window.__loadPath(); if(d){ uiPath=d; rstat('loaded · '+pathInfo(d)); } };
+$id('r_save').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length) window.__savePath(p); else rstat('nothing to save'); };
+$id('r_play').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length){ renderEl.style.display='none'; window.__playPath(p); } else rstat('no path — Record or Load first'); };
+$id('r_smooth').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length){ window.__smoothPath(p, +$id('r_sp').value, +$id('r_sa').value); uiPath=p; rstat('smoothed · '+pathInfo(p)); } else rstat('no path to smooth'); };
+$id('r_render').onclick=()=>{ const p=curPath(); if(!p||!p.frames||!p.frames.length){ rstat('no path — Record or Load first'); return; }
+  renderEl.style.display='none'; window.__renderPath(p, { frames:+$id('r_frames').value, longEdge:+$id('r_pres').value, samples:+$id('r_psamp').value }); };
+$id('r_cancel').onclick=()=>window.__cancelRender();
 function setPower(n){
   n = Math.max(2, Math.min(16, n|0));
   if (n === nPower) return;
@@ -1702,6 +1834,7 @@ window.__recordToggle = () => {
   return recording;
 };
 window.__lastPath = () => ({ format:'gmt-mbulb-path', P:256, fovScale:1.1, frames:recPath });
+window.__recording = () => recording;
 window.__smoothPath = (data, passes, alpha) => {           // re-smooth a path object (e.g. a loaded one)
   smoothPath((data&&data.frames)||[], passes, alpha); return data; };
 window.__samplePath = (data, tau) => { const ks=(data&&data.frames)||[]; if(!ks.length) return null;
@@ -1759,13 +1892,16 @@ window.__playPath = async function(data){                 // real-time replay
     pathSampleAt(ks, tau); requestAnimationFrame(step);
   }; step(); });
 };
-window.__loadPathFile = () => new Promise(res => {         // file-picker → replay
+window.__loadPath = () => new Promise(res => {             // file-picker → RETURN the path object (no play)
   const inp=document.createElement('input'); inp.type='file'; inp.accept='.json';
-  inp.onchange=()=>{ const f=inp.files[0]; if(!f){res();return;} const r=new FileReader();
-    r.onload=()=>{ try { window.__playPath(JSON.parse(r.result)).then(res); } catch(e){ console.log('bad path',e); res(); } };
+  inp.onchange=()=>{ const f=inp.files[0]; if(!f){res(null);return;} const r=new FileReader();
+    r.onload=()=>{ try { res(JSON.parse(r.result)); } catch(e){ console.log('bad path',e); res(null); } };
     r.readAsText(f); };
   inp.click();
 });
+window.__loadPathFile = () => window.__loadPath().then(d => d ? window.__playPath(d) : null);  // load → replay
+window.__savePath = (data, name) => { if(!data||!data.frames) return;                          // download a path object
+  downloadJSON(data, name || `mandelbulb_path_${data.frames.length}f_${Date.now()}.json`); };
 
 /* ════════ RENDER A PATH → image sequence (ZIP of numbered PNGs, one download, no deps) ════════
    Resamples the path at `fps` (camera BigInt-interpolated), renders each frame at export quality
@@ -1788,8 +1924,12 @@ function makeZip(files){                                   // store method (PNGs
 }
 window.__renderPath = async function(data, opts){
   if (!deepReady || exporting) return { error:'not ready / busy' };
-  const ks = (data && data.frames) || []; if (ks.length < 1) return { error:'empty path' };
   opts = opts || {};
+  let ks = (data && data.frames) || []; if (ks.length < 1) return { error:'empty path' };
+  if (opts.smooth) {                                       // opts.smooth: passes (number) or {passes,alpha}
+    const s=opts.smooth, passes=(typeof s==='number'?s:s.passes)||2, alpha=(typeof s==='object'&&s.alpha)||0.4;
+    ks = ks.map(k=>({...k, cam:k.cam.slice(), phase:k.phase.slice()})); smoothPath(ks, passes, alpha);  // smooth a COPY
+  }
   const fps = opts.fps||30, longEdge = opts.longEdge||1280, samples = opts.samples||8, tile = opts.tile||128;
   const dur = ks[ks.length-1].t;
   // `frames` (total output frames, resampled evenly over the whole flight) takes precedence over
@@ -1804,7 +1944,7 @@ window.__renderPath = async function(data, opts){
       const r = await renderFrameToBlob(longEdge, samples, tile, `frame ${f+1}/${nFrames} —`);
       if (r.cancelled) return { cancelled:true, framesRendered:f };   // no ZIP — aborted
       files.push({ name:`frame_${String(f).padStart(5,'0')}.png`, data:new Uint8Array(await r.blob.arrayBuffer()) });
-      showProg(`<span class="spin">◓</span> rendering path… frame ${f+1}/${nFrames}<br><small style="color:#9ab">${longEdge}px ×${samples} — __cancelRender() to abort · a ZIP will download when done</small>`);
+      showProg(`<span class="spin">◓</span> rendering path… frame ${f+1}/${nFrames}<br><small style="color:#9ab">${longEdge}px ×${samples} — press Esc to cancel · a ZIP downloads when done</small>`);
     }
     showProg(`packing ${nFrames} frames…`);
     dlBlob(makeZip(files), `mandelbulb_path_${nFrames}f_${fps}fps_${longEdge}px.zip`);

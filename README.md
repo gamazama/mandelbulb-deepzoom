@@ -66,10 +66,14 @@ Click the canvas to capture the mouse.
 The HUD's `gate` line is the live ground-truth check (GPU vs an independent CPU referee at the view
 centre): green ✓ = you're in the trustworthy domain. Speed auto-crawls as you approach the surface.
 
-## Stills, paths & video (console API)
+## Stills, paths & video
 
-Open the dev console for the full pipeline. All renders are **tiled** (TDR-safe at any depth) and
-**jitter-accumulated** (denoise + anti-alias); call `__cancelRender()` (or press **Esc**) to abort.
+**No console needed** — the top-right buttons open in-app panels: **⚙ controls** (every setting as a
+slider / button, mirroring the keys) and **🎬 render** (export a still, record / load / save / smooth a
+camera path, and render a path to a video frame sequence). The console API below does the same things
+if you prefer scripting. All renders are **tiled** (TDR-safe at any depth), **jitter-accumulated**
+(denoise + anti-alias), and **preview on the canvas as they build**; press **Esc** (or `__cancelRender()`)
+to abort.
 
 ```js
 // ── hi-res still (downloads a PNG) ──────────────────────────────────────────
