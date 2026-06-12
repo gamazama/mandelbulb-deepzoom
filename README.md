@@ -133,6 +133,10 @@ __loadPathFile()
 __cancelRender()
 ```
 
+This repo ships a **`sample-flight.json`** (a ~90 s dive) so you can try the path pipeline straight
+away: **🎬 render → Load…** → pick it → **▶ Preview** (press **Esc** to stop), or render it with
+`__renderPathFile({ frames: 180, longEdge: 1920, samples: 12 })`.
+
 Then turn the unzipped frames into a video with [ffmpeg](https://ffmpeg.org):
 
 ```bash

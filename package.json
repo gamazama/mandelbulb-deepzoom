@@ -11,7 +11,8 @@
     "dive": "node harness-dive.test.mjs",
     "kernel": "node gpu-kernel.test.mjs",
     "power-cert": "node power-cert.mjs",
-    "bla": "node bla.test.mjs"
+    "bla": "node bla.test.mjs",
+    "flash": "node flash-test.mjs"
   },
   "devDependencies": {
     "playwright": "^1.44.0"

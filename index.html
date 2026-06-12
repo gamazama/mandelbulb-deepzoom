@@ -2193,8 +2193,11 @@ function frame(now){
     }
 
     /* --- ground-truth gate, ~2×/s: pointwise de at t=0 (GPU HDR vs CPU f64). The 1×1 readPixels
-       forces a GPU sync (small periodic stall) — key V toggles it off for smooth flying/recording. */
-    if (gateOn && !exporting && frameN % 30 === 0) {
+       forces a GPU sync (small periodic stall) — key V toggles it off for smooth flying/recording.
+       Skip once the view is CONVERGED (accumN at cap): the camera/orbit are unchanged so the gate
+       value is identical, and re-probing a static view would only re-introduce the mid-frame sync —
+       which, against the blit-to-canvas of the held still, shows up as an intermittent flash. */
+    if (gateOn && !exporting && frameN % 30 === 0 && accumN < ACCUM_MAX) {
       const g = gateProbeAt(0, fwd);
       gate.tGPU = g.gpu; gate.tCPU = g.cpu;
       gate.relT = g.rel;
