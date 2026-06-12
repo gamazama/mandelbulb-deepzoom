@@ -66,6 +66,15 @@ Click the canvas to capture the mouse.
 The HUD's `gate` line is the live ground-truth check (GPU vs an independent CPU referee at the view
 centre): green ✓ = you're in the trustworthy domain. Speed auto-crawls as you approach the surface.
 
+### Custom colour gradients
+
+The `iteration` and `orbit-trap` colour modes use a built-in cosine palette by default — load your own
+to replace it. **Just drag a PNG onto the window** (the top row of pixels is read as the gradient and
+resampled to a 256-wide strip), or use **⚙ controls → gradient → Load…**. Text palettes also work: a
+`.map` / palette file with one `R G B` per line (0–255 or 0–1). **reset** returns to the built-in
+palette. ([GMT](https://gmt-fractals.com)'s gradient explorer exports both PNG and `.map`, so its
+palettes drop straight in.)
+
 ## Stills, paths & video
 
 **No console needed** — the top-right buttons open in-app panels: **⚙ controls** (every setting as a

@@ -124,6 +124,7 @@
                 padding:4px 0; font:inherit; font-size:11px; cursor:pointer; }
   .seg button.on { background:#1d4d3f; color:#cfe; border-color:#2f7d65; }
   .seg button:hover { color:#cfe; }
+  .note { font-size:10.5px; line-height:1.4; color:#6b8294; margin:-3px 0 9px 88px; }
   .btn { background:#16202a; color:#cde; border:1px solid #2a3a44; border-radius:5px; padding:7px 12px;
          font:inherit; font-size:12px; cursor:pointer; margin:3px 5px 3px 0; }
   .btn:hover { background:#1d4d3f; border-color:#2f7d65; }
@@ -631,6 +632,8 @@ uniform float uBinomN1[17];      // C(n-1,1..n-1) — (1+u)^(n-1) − 1
 uniform vec2  uPhase;            // lobe-twist phase (θ, φ) — used by the f32 far-field DE only
 uniform int   uColorMode;        // 0 = plain | 1 = iteration (escape time) | 2 = orbit trap (origin)
 uniform float uColorScale;       // palette frequency
+uniform sampler2D uGradient;     // loaded gradient strip (when uUseGradient=1)
+uniform int   uUseGradient;      // 0 = built-in cosine palette | 1 = sample uGradient
 uniform int   uLightMode;        // 0 = directional | 1 = camera headlamp | 2 = both
 uniform vec2  uFalloff;          // headlamp falloff length L (HDR; = smoothedDist · mul)
 uniform int       uBla;          // 1 = BLA skip-table path on (else exact per-step §3)
@@ -672,8 +675,11 @@ vec2 deAt(vec2 t, vec3 rd, out bool esc) {
   esc = oo.escaped;
   return oo.de;
 }
-/* IQ cosine palette */
-vec3 palette(float s){ return 0.5 + 0.5*cos(6.2831853*(s + vec3(0.0, 0.33, 0.67))); }
+/* palette: a loaded gradient strip if present, else the built-in IQ cosine palette */
+vec3 palette(float s){
+  if (uUseGradient == 1) return texture(uGradient, vec2(fract(s), 0.5)).rgb;
+  return 0.5 + 0.5*cos(6.2831853*(s + vec3(0.0, 0.33, 0.67)));
+}
 /* surface colour from the orbit at the hit (1 = escape-time bands, 2 = origin orbit-trap filigree) */
 vec3 surfaceColor(vec2 t, vec3 rd){
   if (uColorMode == 0) return vec3(0.62,0.55,0.78);
@@ -931,6 +937,7 @@ function makeUD(p){ const g = n => gl.getUniformLocation(p,n);
             normalMode:g('uNormalMode'), bisectMax:g('uBisectMax'), jitter:g('uJitter'),
             power:g('uPower'), powerI:g('uPowerI'), binomN:g('uBinomN'), binomN1:g('uBinomN1'), phase:g('uPhase'),
             colorMode:g('uColorMode'), colorScale:g('uColorScale'),
+            gradient:g('uGradient'), useGradient:g('uUseGradient'),
             lightMode:g('uLightMode'), falloff:g('uFalloff'),
             bla:g('uBla'), blaTab:g('uBlaTab'), blaMaxLvl:g('uBlaMaxLvl'),
             blaUsable:g('uBlaUsable') }; }
@@ -1149,6 +1156,8 @@ function setPowerUniforms(x){
   gl.uniform2f(x.phase, phaseTheta, phasePhi);
   gl.uniform1i(x.colorMode, colorMode);
   gl.uniform1f(x.colorScale, colorScale);
+  gl.uniform1i(x.useGradient, gradientTex ? 1 : 0);
+  if (gradientTex){ gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, gradientTex); gl.uniform1i(x.gradient, 2); gl.activeTexture(gl.TEXTURE0); }
   gl.uniform1i(x.lightMode, lightMode);
   const Lf = hdrSplit(Math.max(smoothedDist,1e-300) * falloffMul);   // headlamp falloff length (HDR)
   gl.uniform2f(x.falloff, Lf.m, Lf.e);
@@ -1178,6 +1187,71 @@ function uploadOrbit(O) {
     }
   } else curBla = null;
 }
+
+/* ════════ Gradient palette loading ════════
+   Drop in a gradient and it replaces the built-in cosine palette for the iteration /
+   orbit-trap colour modes. Easiest correct path: a PNG (any size) — the top row of
+   pixels is resampled to a 256-wide strip; or a text .map / palette (one "R G B" per
+   line, 0–255 or 0–1). Texture lives on unit 2 (0=orbit, 1=BLA). */
+let gradientTex = null;
+function uploadStrip(rgba, w){                 // rgba: Uint8Array(w*4), one row
+  if (!gradientTex) gradientTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, gradientTex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.activeTexture(gl.TEXTURE0);
+  accumReset = true;
+  if (colorMode === 0){ colorMode = 2; }       // give the gradient something to colour
+}
+function gradientFromImage(img){               // resample the image's TOP row to 256px
+  const c = document.createElement('canvas'); c.width = 256; c.height = 1;
+  const cx = c.getContext('2d'); cx.imageSmoothingEnabled = true;
+  cx.drawImage(img, 0, 0, img.naturalWidth || img.width, 1, 0, 0, 256, 1);  // src = top row
+  uploadStrip(new Uint8Array(cx.getImageData(0, 0, 256, 1).data.buffer), 256);
+}
+function gradientFromText(txt){                 // "R G B" per line (0–255 or 0–1), commas/headers ignored
+  const nums = (txt.match(/-?\d*\.?\d+/g) || []).map(Number);
+  const trip = []; for (let i = 0; i + 2 < nums.length; i += 3) trip.push([nums[i], nums[i+1], nums[i+2]]);
+  if (!trip.length) throw new Error('no R G B triplets found');
+  const max = Math.max(...trip.flat());
+  const sc = max <= 1.0001 ? 255 : 1;          // detect 0–1 floats vs 0–255 ints
+  const w = trip.length, a = new Uint8Array(w*4);
+  for (let i = 0; i < w; i++){ a[i*4]=Math.round(Math.min(255,trip[i][0]*sc)); a[i*4+1]=Math.round(Math.min(255,trip[i][1]*sc)); a[i*4+2]=Math.round(Math.min(255,trip[i][2]*sc)); a[i*4+3]=255; }
+  uploadStrip(a, w);
+}
+window.__loadGradient = (file) => new Promise((res, rej) => {
+  const isImg = /^image\//.test(file.type) || /\.(png|jpe?g|gif|bmp|webp)$/i.test(file.name);
+  const fr = new FileReader();
+  fr.onerror = () => rej(fr.error);
+  if (isImg){
+    const img = new Image();
+    img.onload = () => { try { gradientFromImage(img); URL.revokeObjectURL(img.src); res('image'); } catch(e){ rej(e); } };
+    img.onerror = () => rej(new Error('image decode failed'));
+    img.src = URL.createObjectURL(file);
+  } else {
+    fr.onload = () => { try { gradientFromText(fr.result); res('text'); } catch(e){ rej(e); } };
+    fr.readAsText(file);
+  }
+});
+window.__loadGradientFile = () => new Promise((res) => {
+  const inp = document.createElement('input'); inp.type = 'file';
+  inp.accept = 'image/*,.map,.txt,.gradient,.pal';
+  inp.onchange = () => { if (inp.files[0]) window.__loadGradient(inp.files[0]).then(res).catch(e=>{ alert('Gradient load failed: '+e.message); res(null); }); };
+  inp.click();
+});
+window.__clearGradient = () => { gradientTex = null; accumReset = true; };  // back to the built-in cosine palette
+
+/* drag-and-drop a gradient file anywhere on the page */
+addEventListener('dragover', e => { e.preventDefault(); });
+addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer && e.dataTransfer.files[0];
+  if (f) window.__loadGradient(f).catch(err => alert('Gradient load failed: '+err.message));
+});
 
 /* ════════ CPU f64 perturbed march — the GROUND-TRUTH GATE (brief §4) ════════
    Independent implementation path: plain f64 δ (JS doubles reach 1e-308, so no HDR
@@ -1347,6 +1421,7 @@ addEventListener('keydown',e=>{ keys[e.code]=true;
   if(e.code==='KeyM') window.__recordToggle();                                    // record/stop+save camera path
   if(e.key==='?') toggleAbout();                                                  // About / Credits panel
   if(e.key==='Escape' && exporting) window.__cancelRender();                      // abort an export / path render
+  if(e.key==='Escape' && playingPath) window.__stopPlay();                        // stop a path preview
   if(e.key==='Escape' && aboutEl && aboutEl.style.display==='flex') toggleAbout();
 });
 const aboutEl = document.getElementById('about');
@@ -1367,6 +1442,7 @@ const CTLS = [
   {t:'seg', l:'normals',  g:()=>normalMode, opts:[['screen',0],['3-tap',1],['4-tap',2]], s:v=>{normalMode=v; accumReset=true;}},
   {t:'seg', l:'colour',   g:()=>colorMode, opts:[['plain',0],['iter',1],['trap',2]], s:v=>{colorMode=v; accumReset=true;}},
   {t:'rng', l:'palette',  g:()=>colorScale, min:0.1,max:8,step:0.1, fmt:v=>v.toFixed(1), s:v=>{colorScale=v; accumReset=true;}},
+  {t:'act', l:'gradient', note:'Drop a PNG anywhere (its top row of pixels = the gradient), or load a .map / palette text file. Replaces the built-in palette for iter / trap colour.', acts:[['Load…',()=>window.__loadGradientFile()],['reset',()=>window.__clearGradient()]]},
   {t:'rng', l:'detail',   g:()=>surfMul, min:0.25,max:32,step:0.25, fmt:v=>v.toFixed(2), s:v=>{surfMul=v; accumReset=true;}},
   {t:'seg', l:'lighting', g:()=>lightMode, opts:[['direct',0],['lamp',1],['both',2]], s:v=>{lightMode=v; accumReset=true;}},
   {t:'rng', l:'falloff',  g:()=>falloffMul, min:0.5,max:32,step:0.5, fmt:v=>v.toFixed(1), s:v=>{falloffMul=v; accumReset=true;}},
@@ -1393,8 +1469,13 @@ const CTLS = [
       off.textContent='off'; on.textContent='on';
       off.onclick=()=>{ c.s(false); syncControls(); }; on.onclick=()=>{ c.s(true); syncControls(); };
       c._btns=[off,on]; c._vals=[false,true]; seg.appendChild(off); seg.appendChild(on); row.appendChild(seg);
+    } else if (c.t==='act'){
+      const seg=document.createElement('div'); seg.className='seg';
+      for(const [txt,fn] of c.acts){ const bn=document.createElement('button'); bn.textContent=txt; bn.onclick=fn; seg.appendChild(bn); }
+      row.appendChild(seg);
     }
     body.appendChild(row);
+    if (c.note){ const nt=document.createElement('div'); nt.className='note'; nt.textContent=c.note; body.appendChild(nt); }
   }
 })();
 function syncControls(){
@@ -1883,12 +1964,15 @@ function smoothPath(ks, passes=2, alpha=0.4){
   }
   return ks;
 }
+let playingPath = false;
+window.__stopPlay = () => { playingPath = false; };               // Esc / button aborts a preview
 window.__playPath = async function(data){                 // real-time replay
   const ks = (data && data.frames) || []; if (ks.length < 1) return { error:'empty path' };
-  modeOverride = 'deep'; const tEnd = ks[ks.length-1].t, t0 = performance.now();
+  modeOverride = 'deep'; const tEnd = ks[ks.length-1].t, t0 = performance.now(); playingPath = true;
   return new Promise(res => { const step = () => {
+    if (!playingPath) { res({ frames: ks.length, stopped:true }); return; }   // aborted
     const tau = (performance.now()-t0)/1000;
-    if (tau >= tEnd) { pathSampleAt(ks, tEnd); res({ frames: ks.length }); return; }
+    if (tau >= tEnd) { pathSampleAt(ks, tEnd); playingPath = false; res({ frames: ks.length }); return; }
     pathSampleAt(ks, tau); requestAnimationFrame(step);
   }; step(); });
 };
