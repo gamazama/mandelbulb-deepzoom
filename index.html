@@ -470,13 +470,14 @@ Hdr3 blaApply(sampler2D tab, int lvl, int idx, Hdr3 d, Hdr3 dc, inout vec2 Ddr) 
   return Hdr3(hdrAdd(Ad.x,Bdc.x), hdrAdd(Ad.y,Bdc.y), hdrAdd(Ad.z,Bdc.z));
 }
 #endif
-struct OrbitOut { Hdr3 d; vec2 Dr; vec2 Ddr; vec2 de; int iters; int rebases; bool escaped; float trap; };
+struct OrbitOut { Hdr3 d; vec2 Dr; vec2 Ddr; vec2 de; int iters; int rebases; bool escaped; float trap; float escR; };
 OrbitOut pertOrbit(sampler2D orbit, int orbitLen, Hdr3 dc, int maxIter) {
   Hdr3 d = dc;
   vec2 Ddr = vec2(0.0);
   int m = 0, rebases = 0, it = 0;
   bool escaped = false;
   float trap = 1e30;                          // orbit trap: min |z_k| over the orbit (origin trap)
+  float escR2 = 4.0;                          // |z|² at escape — for continuous (smooth) iteration colour
 #ifdef USE_BLA
   vec2 dcMag = hdrSqrt(h3Dot(dc, dc));        // |δc| (rd normalized ⇒ ≈ |t|) for BLA validity
 #endif
@@ -517,9 +518,10 @@ OrbitOut pertOrbit(sampler2D orbit, int orbitLen, Hdr3 dc, int maxIter) {
     RefIter rn = fetchRef(orbit, m);
     vec3 df = h3ToVec3(d);
     vec3 zf = rn.V + df;
-    trap = min(trap, dot(zf, zf));            // track min |z|² (sqrt once at the end)
-    if (dot(zf, zf) > 4.0) { escaped = true; break; }
-    if (dot(zf, zf) < dot(df, df) || m >= orbitLen - 1) {
+    float z2 = dot(zf, zf);
+    trap = min(trap, z2);                      // track min |z|² (sqrt once at the end)
+    if (z2 > 4.0) { escaped = true; escR2 = z2; break; }
+    if (z2 < dot(df, df) || m >= orbitLen - 1) {
       d = h3FromVec3(zf - fetchRef(orbit, 0).V);
       Ddr = hdrAdd(hdrSub(rn.DR, vec2(1.0, 0.0)), Ddr);
       m = 0; rebases++;
@@ -532,7 +534,7 @@ OrbitOut pertOrbit(sampler2D orbit, int orbitLen, Hdr3 dc, int maxIter) {
   vec2 drH = hdrAdd(rf.DR, Ddr);
   float rF = max(r2f, 1e-12);
   vec2 de = hdrMul(hdrFromFloat(0.5 * rF * log(rF)), hdrRecip(drH));
-  return OrbitOut(d, Dr, Ddr, de, it, rebases, escaped, sqrt(trap));
+  return OrbitOut(d, Dr, Ddr, de, it, rebases, escaped, sqrt(trap), sqrt(escR2));
 }
 `;
 
@@ -669,9 +671,9 @@ vec3 normalF32(vec3 p, float e){
    esc=false ⇒ the orbit did NOT escape within budget ⇒ the point is inside the
    n-iteration surface — its de is WRAPPED GARBAGE and must be treated as a hit,
    never trusted for stepping (the second placement-failure mechanism). */
-vec2 deAt(vec2 t, vec3 rd, out bool esc) {
+vec2 deAt(vec2 t, vec3 rd, out bool esc, out OrbitOut oo) {
   Hdr3 dp = Hdr3(hdrMulF(t, rd.x), hdrMulF(t, rd.y), hdrMulF(t, rd.z));
-  OrbitOut oo = pertOrbit(uOrbit, uOrbitLen, dp, uIters);
+  oo = pertOrbit(uOrbit, uOrbitLen, dp, uIters);
   esc = oo.escaped;
   return oo.de;
 }
@@ -680,23 +682,37 @@ vec3 palette(float s){
   if (uUseGradient == 1) return texture(uGradient, vec2(fract(s), 0.5)).rgb;
   return 0.5 + 0.5*cos(6.2831853*(s + vec3(0.0, 0.33, 0.67)));
 }
-/* surface colour from the orbit at the hit (1 = escape-time bands, 2 = origin orbit-trap filigree) */
-vec3 surfaceColor(vec2 t, vec3 rd){
+/* surface colour from the (reused) hit orbit — no extra orbit march.
+   1 = SMOOTH escape-time bands (continuous, not integer-stepped);
+   2 = origin orbit-trap, log-spread so deep zooms keep contrast instead of flattening. */
+vec3 colorFromOrbit(OrbitOut co){
   if (uColorMode == 0) return vec3(0.62,0.55,0.78);
-  OrbitOut co = pertOrbit(uOrbit, uOrbitLen, Hdr3(hdrMulF(t,rd.x),hdrMulF(t,rd.y),hdrMulF(t,rd.z)), uIters);
-  float s = uColorMode == 1 ? float(co.iters)*0.08 : co.trap;
-  return palette(s * uColorScale);
+  float s;
+  if (uColorMode == 1) {
+    /* fractional iteration count: iters + 1 − log(log|z|)/log n → smooth gradients, no banding */
+    float mu = float(co.iters) + 1.0 - log(log(max(co.escR, 2.0001))) / log(uPower);
+    s = mu * 0.18;
+  } else {
+    /* min-|z| barely varies across a deep-zoom frame; log() spreads that compressed range
+       back into visible, smooth contrast (the raw value gave one flat colour). */
+    s = log(max(co.trap, 1e-30)) * 1.5;
+  }
+  vec3 c = palette(s * uColorScale);
+  float l = dot(c, vec3(0.299, 0.587, 0.114));   // gentle desaturation so the lit result isn't garish
+  return mix(vec3(l), c, 0.82);
 }
 /* The near-field HDR perturbation march (capped anti-arm-skip stepping + bisection onto the
    n-iter boundary). Shared by the render path AND probe 3 (population study) so they march
    IDENTICALLY. Returns the surface t (HDR); sets hit, steps, de-at-hit, and tF≥0 if the ray
    handed off to the far-field f32 segment (t>T_SWITCH). */
-vec2 marchNear(vec3 rd, float pa, out bool hit, out int steps, out vec2 deOut, out float tF) {
+vec2 marchNear(vec3 rd, float pa, out bool hit, out int steps, out vec2 deOut, out float tF, out OrbitOut hitOrbit) {
   vec2 t = vec2(0.0), tPrev = vec2(0.0), cap = vec2(0.0), de = vec2(0.0);
   hit = false; steps = 0; tF = -1.0; bool esc = false;
+  OrbitOut oo; OrbitOut lastOO; lastOO.escaped = false;   // last surface-side orbit → reused for colour
   for (int st = 0; st < 256; st++) {
     steps = st;
-    de = deAt(t, rd, esc);
+    de = deAt(t, rd, esc, oo);
+    lastOO = oo;
     if (!esc || de.x <= 0.0) {
       /* bracket [tPrev,t] starts at the LAST (capped) step, already ≪ the cone, so the
          w<0.25·pa early-break ends most bisections in a few iters; uBisectMax (≈12) just
@@ -704,8 +720,8 @@ vec2 marchNear(vec3 rd, float pa, out bool hit, out int steps, out vec2 deOut, o
       for (int b = 0; b < 32; b++) {
         if (b >= uBisectMax) break;
         vec2 tm = hdrMulF(hdrAdd(tPrev, t), 0.5);
-        bool me; vec2 md = deAt(tm, rd, me);
-        if (!me || md.x <= 0.0) t = tm; else { tPrev = tm; de = md; }
+        bool me; OrbitOut moo; vec2 md = deAt(tm, rd, me, moo);
+        if (!me || md.x <= 0.0) t = tm; else { tPrev = tm; de = md; lastOO = moo; }
         float w = hdrToFloat(hdrMul(hdrSub(t, tPrev), hdrRecip(t)));
         if (w < 0.25 * pa) break;
       }
@@ -725,6 +741,7 @@ vec2 marchNear(vec3 rd, float pa, out bool hit, out int steps, out vec2 deOut, o
     t = hdrAdd(t, step);
   }
   deOut = de;
+  hitOrbit = lastOO;
   return t;
 }
 void main(){
@@ -735,8 +752,8 @@ void main(){
         /* POINTWISE gate probe: de at exactly t = uProbeT on the center ray.
            March-termination comparison is ill-conditioned (steps jump folds);
            same-input de comparison is the meaningful §4 ground-truth check. */
-        bool pesc;
-        vec2 pde = deAt(uProbeT, rd, pesc);
+        bool pesc; OrbitOut poo;
+        vec2 pde = deAt(uProbeT, rd, pesc, poo);
         o = vec4(pde, pesc ? 1.0 : 0.0, 0.0);
         return;
     }
@@ -754,7 +771,8 @@ void main(){
     bool hit = false; int steps = 0; bool exhausted = false; bool farHit = false;
     float tF = -1.0;                             // ≥0 once the far-field f32 segment takes over
     vec2 de = vec2(0.0);
-    vec2 t = marchNear(rd, pixAng, hit, steps, de, tF);   // shared near-field HDR march
+    OrbitOut hitOrbit;
+    vec2 t = marchNear(rd, pixAng, hit, steps, de, tF, hitOrbit);   // shared near-field HDR march (orbit reused for colour)
     if (uProbe == 3) {
         /* MARCH-POPULATION probe (SLICE 6b): emit the surface position from the SAME march the
            renderer runs (marchNear inlined ONCE) — the user-visible quantity. Output
@@ -829,8 +847,8 @@ void main(){
                 n = normalize(n);
             }
         }
-        float ao = 1.0 - float(steps)/256.0;
-        vec3 base = surfaceColor(t, rd);
+        float ao = pow(1.0 - float(steps)/256.0, 1.5);   // crisper crevice darkening
+        vec3 base = colorFromOrbit(hitOrbit);             // reuse the march's hit orbit — no extra march
         col = vec3(0.0);
         if (uLightMode != 1) {                        // distant directional (modes 0 = current, 2 = both)
             float diff = max(0.0, dot(n, uLightDir));
@@ -843,11 +861,13 @@ void main(){
                to shadow → the depth cue a directional light can't give at deep zoom. */
             float a = hdrToFloat(hdrMul(t, hdrRecip(uFalloff)));
             float atten = 1.0 / (1.0 + a*a);
-            vec3 lh = -rd;                             // direction to the light (the camera)
+            vec3 lh = normalize(-rd + 0.22*uUp + 0.12*uRight);   // lamp offset up/right of the eye → modelling, not a flat frontal wash
             float diffH = max(0.0, dot(n, lh));
             col += (0.04 + 0.96*diffH) * base * atten * (0.4+0.6*ao);
             col += pow(max(0.0,dot(reflect(rd,n),lh)),32.0) * atten * 0.5;
         }
+        float fres = pow(1.0 - max(0.0, dot(n, -rd)), 4.0);   // silhouette rim — reads edges/depth
+        col += fres * 0.15 * base;
     } else if (farHit) {
         vec3 p = uCamPosF + rd*tF;
         vec3 n = normalF32(p, 2.0*pixAng*tF);
@@ -866,7 +886,8 @@ void main(){
     } else if (exhausted) {
         col = vec3(0.10,0.08,0.12);              // dark, not background — no fake holes
     }
-    col = pow(col, vec3(0.4545));
+    col = (col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);   // ACES filmic tone map (Narkowicz) — tames highlights
+    col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));
     o = vec4(col,1.0);
 }`;
 
@@ -1385,9 +1406,10 @@ let smoothedDist = 1.0;
 let modeOverride = 'auto';                      // 'auto' | 'deep' | 'f32'
 let deepDiv = 4;                                // deep-mode resolution divisor
 let autoIters = true;                           // key I: scale iterations with depth
-let normalMode = 1;                             // key N: 0 screen-space (0 orbits) | 1 3-tap (default) | 2 4-tap
-                                                // screen-space is free but amplifies near-critical t-noise
-                                                // into speckle at depth; 3-tap matches the 4-tap look at −25%
+let normalMode = 2;                             // key N: 0 screen-space (0 orbits) | 1 3-tap (biased) | 2 4-tap (default)
+                                                // 4-tap tetrahedron = symmetric, reference-correct DE normal.
+                                                // 3-tap is a one-sided forward difference: 1 fewer orbit but a
+                                                // systematic +XYZ tilt (looks different). screen-space = free, speckles at depth.
 let bisectMax = 12;                             // adaptive bisection cap (was fixed 22; early-break ends most)
 let colorMode = 0, colorScale = 1.0;            // key C: 0 plain / 1 iteration / 2 orbit-trap; 9/0 scale
 let surfMul = 1.0;                              // keys F/G: how close rays reach the surface (÷pixAng).
@@ -1441,12 +1463,13 @@ const CTLS = [
   {t:'rng', l:'phase θ',  g:()=>phaseTheta, min:0,max:6.2832,step:0.02, fmt:v=>v.toFixed(2), s:v=>{phaseTheta=v; orbitDirty=true;}},
   {t:'seg', l:'normals',  g:()=>normalMode, opts:[['screen',0],['3-tap',1],['4-tap',2]], s:v=>{normalMode=v; accumReset=true;}},
   {t:'seg', l:'colour',   g:()=>colorMode, opts:[['plain',0],['iter',1],['trap',2]], s:v=>{colorMode=v; accumReset=true;}},
-  {t:'rng', l:'palette',  g:()=>colorScale, min:0.1,max:8,step:0.1, fmt:v=>v.toFixed(1), s:v=>{colorScale=v; accumReset=true;}},
+  {t:'rng', l:'palette',  g:()=>colorScale, min:0.1,max:16,step:0.1, fmt:v=>v.toFixed(1), s:v=>{colorScale=v; accumReset=true;}},
   {t:'act', l:'gradient', note:'Drop a PNG anywhere (its top row of pixels = the gradient), or load a .map / palette text file. Replaces the built-in palette for iter / trap colour.', acts:[['Load…',()=>window.__loadGradientFile()],['reset',()=>window.__clearGradient()]]},
   {t:'rng', l:'detail',   g:()=>surfMul, min:0.25,max:32,step:0.25, fmt:v=>v.toFixed(2), s:v=>{surfMul=v; accumReset=true;}},
   {t:'seg', l:'lighting', g:()=>lightMode, opts:[['direct',0],['lamp',1],['both',2]], s:v=>{lightMode=v; accumReset=true;}},
   {t:'rng', l:'falloff',  g:()=>falloffMul, min:0.5,max:32,step:0.5, fmt:v=>v.toFixed(1), s:v=>{falloffMul=v; accumReset=true;}},
   {t:'tog', l:'gate',     g:()=>gateOn, s:v=>{gateOn=v; if(!v) gate.relT=NaN;}},
+  {t:'rng', l:'kf spacing', note:'Recording only — higher = fewer, sparser keyframes (records farther apart as you fly). Sit still to decide; nothing records until you move.', g:()=>kfSpacing, min:0.3,max:5,step:0.1, fmt:v=>v.toFixed(1)+'×', s:v=>{kfSpacing=v;}},
 ];
 (function buildControls(){
   const body = $id('ctlbody');
@@ -1493,7 +1516,7 @@ setInterval(()=>{ if(controlsOpen) syncControls(); }, 150);    // reflect key-dr
 /* ── render / export panel ── */
 let uiPath=null;
 function curPath(){ return uiPath || window.__lastPath(); }
-function pathInfo(p){ const n=p&&p.frames?p.frames.length:0; return n ? `path: ${n} keyframes, ${p.frames[n-1].t.toFixed(1)} s` : 'no path yet — Record or Load one'; }
+function pathInfo(p){ const n=p&&p.frames?p.frames.length:0; const last=n?(p.frames[n-1].t||0):0; return n ? `path: ${n} keyframes${last?`, ${last.toFixed(1)} s`:''}` : 'no path yet — Record or Load one'; }
 function rstat(m){ const e=$id('rstatus'); if(e) e.textContent=m; }
 function recLabel(){ $id('r_rec').textContent = (window.__recording&&window.__recording()) ? '■ Stop & save' : '● Record'; }
 $id('renderbtn').addEventListener('click', ()=>{ const open=renderEl.style.display==='flex'; renderEl.style.display=open?'none':'flex'; if(!open){ recLabel(); rstat(pathInfo(curPath())); } });
@@ -1533,6 +1556,15 @@ function basis(){
   const right=[Math.cos(cam.yaw+Math.PI/2),0,Math.sin(cam.yaw+Math.PI/2)];
   const up=[ right[1]*fwd[2]-right[2]*fwd[1], right[2]*fwd[0]-right[0]*fwd[2], right[0]*fwd[1]-right[1]*fwd[0] ];
   return {fwd,right,up};
+}
+/* three-quarter KEY light, camera-relative: upper-right and toward the camera (front-lit). Fixed
+   world-direction lighting grazes/backlights as you fly because the surface's orientation relative
+   to you keeps changing; anchoring the key to the camera basis keeps the modelling consistent. */
+function keyLightDir(right, up, fwd){
+  const l = [ right[0]*0.5 + up[0]*0.85 - fwd[0]*0.35,
+              right[1]*0.5 + up[1]*0.85 - fwd[1]*0.35,
+              right[2]*0.5 + up[2]*0.85 - fwd[2]*0.35 ];
+  const m = Math.hypot(...l) || 1; return [l[0]/m, l[1]/m, l[2]/m];
 }
 function deCPU(px,py,pz, power, N){
     let zx=px,zy=py,zz=pz, dr=1, r=0;
@@ -1786,6 +1818,7 @@ window.__setColor = (m,s)=>{ colorMode=m|0; if(s) colorScale=s; accumReset=true;
 window.__setSurf = (m)=>{ surfMul=Math.max(0.25,Math.min(256,m||1)); accumReset=true; };  // ray-closeness ÷pixAng
 window.__setGate = (b)=>{ gateOn=!!b; if(!gateOn) gate.relT=NaN; };  // live ground-truth gate on/off
 window.__setLight = (m,f)=>{ lightMode=m|0; if(f) falloffMul=f; accumReset=true; };  // 0 dir/1 headlamp/2 both
+window.__setKfSpacing = (v)=>{ kfSpacing = Math.max(0.2, +v||1.5); };  // recording: keyframe sparsity (higher = fewer)
 let forceRebuild=false;                            // measurement: simulate flight (rebuild every frame)
 window.__forceRebuild = (b)=>{ forceRebuild = !!b; };
 window.__setAccum = (b)=>{ accumEnabled = !!b; accumReset = true; };  // progressive-still toggle
@@ -1809,7 +1842,7 @@ async function renderFrameToBlob(longEdge, samples, tile, label){
   if (aspect < 1) { H = Math.round(longEdge); W = Math.round(longEdge*aspect); }
   W -= W % 2; H -= H % 2;
   const {fwd,right,up} = basis();
-  const light = (()=>{const l=[0.5,0.8,0.3];const m=Math.hypot(...l);return[l[0]/m,l[1]/m,l[2]/m];})();
+  const light = keyLightDir(right, up, fwd);   // camera-relative key — stable modelling as you fly
   const aT = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, aT);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,W,H,0,gl.RGBA,gl.FLOAT,null);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
@@ -1892,13 +1925,47 @@ window.__export = async function(longEdge, samples, tile){
    Records the full camera + scene state per frame (camHP kept as P=256 BigInt decimal STRINGS — no
    precision loss), downloads it as JSON, and can replay it (BigInt-lerped positions → smooth at any
    depth). Pairs with __export for rendering a path to an image sequence. */
-let recording=false, recPath=[], recStart=0, lastCap=0;
-function capturePathFrame(now){
-  if (now - lastCap < 33) return;                          // ~30 keyframes/s
-  lastCap = now;
-  recPath.push({ t:(now-recStart)/1000, cam:camHP.map(String), yaw:cam.yaw, pitch:cam.pitch,
+let recording=false, recPath=[], recStart=0;
+/* SPARSE, movement-driven keyframing. A keyframe lands only at a decision point — when you
+   COMMIT to a move (start flying after stopping to look), at depth-relative spacing along a
+   long continuous flight, or on a deliberate stationary pan. Sit still deciding (raise res,
+   look around, pick a direction) and nothing records, so keyframes mark where you chose to go. */
+let kfLastHP=null, kfLastYaw=0, kfLastPitch=0, kfWasFlying=false;
+const KF_MOVE=0.35, KF_ROT=0.30;                 // base: emit after ~1/3 of the surface distance moved, or ~17° pan
+let   kfSpacing=1.5;                             // UI knob (key/slider): higher ⇒ fewer, sparser keyframes
+const SEG_BASE=1.4, SEG_MIN=0.7, SEG_MAX=3.0;    // cinematic seconds per segment (decoupled from real dwell)
+function isFlying(){ return !!(keys['KeyW']||keys['KeyS']||keys['KeyA']||keys['KeyD']||keys['KeyE']||keys['KeyQ']); }
+function pushKeyframe(move, rot){
+  recPath.push({ cam:camHP.map(String), yaw:cam.yaw, pitch:cam.pitch,
     iters:cam.iters, power:nPower, phase:[phaseTheta,phasePhi], div:deepDiv, light:lightMode,
-    falloff:falloffMul, color:colorMode, cscale:colorScale, surf:surfMul });
+    falloff:falloffMul, color:colorMode, cscale:colorScale, surf:surfMul, move, rot });
+  kfLastHP = camHP.slice(); kfLastYaw = cam.yaw; kfLastPitch = cam.pitch;
+}
+function capturePathFrame(){
+  const flying = isFlying();
+  if (kfLastHP === null) { pushKeyframe(0,0); kfWasFlying = flying; return; }   // initial viewpoint
+  let s2 = 0; for (let j=0;j<3;j++){ const d = hp.toNum(camHP[j]-kfLastHP[j]); s2 += d*d; }
+  const move = Math.sqrt(s2) / Math.max(smoothedDist, 1e-300);                  // depth-relative distance
+  const rot  = Math.abs(cam.yaw-kfLastYaw) + Math.abs(cam.pitch-kfLastPitch);
+  const mv = KF_MOVE*kfSpacing, rt = KF_ROT*kfSpacing;
+  let emit = false;
+  if (flying && !kfWasFlying && (move > 0.25*mv || rot > 0.4*rt)) emit = true;   // re-commit AFTER a real look-around (not every nudge)
+  else if (move > mv)              emit = true;     // spacing along a long continuous flight
+  else if (!flying && rot > rt)    emit = true;     // deliberate stationary pan
+  if (emit) pushKeyframe(move, rot);
+  kfWasFlying = flying;
+}
+/* cinematic timing: every segment gets eased seconds scaled by its depth-relative move/rotation,
+   independent of how long you dwelled choosing — steady pacing regardless of decision time. */
+function assignCinematicTime(ks){
+  let t = 0;
+  for (let i=0;i<ks.length;i++){
+    if (i===0){ ks[i].t = 0; continue; }
+    const k = ks[i];
+    const dur = Math.min(SEG_MAX, Math.max(SEG_MIN, SEG_BASE*(0.7*(k.move||0)/KF_MOVE + 0.3*(k.rot||0)/KF_ROT)));
+    t += dur; ks[i].t = t;
+  }
+  return ks;
 }
 function downloadJSON(obj, name){
   const blob = new Blob([JSON.stringify(obj)], { type:'application/json' });
@@ -1906,8 +1973,9 @@ function downloadJSON(obj, name){
   a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
 }
 window.__recordToggle = () => {
-  if (!recording) { recording=true; recPath=[]; recStart=performance.now(); lastCap=0; }
+  if (!recording) { recording=true; recPath=[]; recStart=performance.now(); kfLastHP=null; kfWasFlying=false; }
   else { recording=false;
+    assignCinematicTime(recPath);                          // decouple video time from real dwell time
     smoothPath(recPath);                                   // de-jitter before saving / using
     if (recPath.length) downloadJSON({ format:'gmt-mbulb-path', P:256, fovScale:1.1, frames:recPath },
       `mandelbulb_path_${recPath.length}f_${Date.now()}.json`);
@@ -2119,7 +2187,7 @@ function frame(now){
   if(keys['KeyD']) mv(right,speed);  if(keys['KeyA']) mv(right,-speed);
   if(keys['KeyE']) mv([0,1,0], speed); if(keys['KeyQ']) mv([0,1,0],-speed);
 
-  if (recording) capturePathFrame(now);          // camera-path recording (~30 keyframes/s)
+  if (recording) capturePathFrame();             // camera-path recording (sparse, movement-driven)
 
   /* --- render --- */
   /* ⚠ TDR guard: deep full-res frames at depth-scaled iteration counts exceed the ~2 s
@@ -2130,7 +2198,7 @@ function frame(now){
   const div = deepActive ? deepDiv : 1;
   const w = Math.max(2, Math.floor(canvas.clientWidth  / div));
   const h = Math.max(2, Math.floor(canvas.clientHeight / div));
-  const light = (()=>{const l=[0.5,0.8,0.3];const m=Math.hypot(...l);return[l[0]/m,l[1]/m,l[2]/m];})();
+  const light = keyLightDir(right, up, fwd);   // camera-relative key — stable modelling as you fly
 
   /* idle detection for progressive accumulation: any view change set accumReset (movement →
      orbitDirty → rebuild → accumReset; rotation/keys → accumReset directly). */
