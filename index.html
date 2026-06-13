@@ -1525,7 +1525,7 @@ $id('r_export').onclick=()=>{ renderEl.style.display='none'; window.__export(+$i
 $id('r_rec').onclick=()=>{ const rec=window.__recordToggle(); recLabel(); if(!rec){ uiPath=window.__lastPath(); rstat(pathInfo(uiPath)); } else rstat('recording — fly, then Stop'); };
 $id('r_load').onclick=async()=>{ const d=await window.__loadPath(); if(d){ uiPath=d; rstat('loaded · '+pathInfo(d)); } };
 $id('r_save').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length) window.__savePath(p); else rstat('nothing to save'); };
-$id('r_play').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length){ renderEl.style.display='none'; window.__playPath(p); } else rstat('no path — Record or Load first'); };
+$id('r_play').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length){ renderEl.style.display='none'; window.__playPath(p, { frames:+$id('r_frames').value, fps:30 }); } else rstat('no path — Record or Load first'); };
 $id('r_smooth').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length){ window.__smoothPath(p, +$id('r_sp').value, +$id('r_sa').value); uiPath=p; rstat('smoothed · '+pathInfo(p)); } else rstat('no path to smooth'); };
 $id('r_render').onclick=()=>{ const p=curPath(); if(!p||!p.frames||!p.frames.length){ rstat('no path — Record or Load first'); return; }
   renderEl.style.display='none'; window.__renderPath(p, { frames:+$id('r_frames').value, longEdge:+$id('r_pres').value, samples:+$id('r_psamp').value }); };
@@ -2016,6 +2016,32 @@ function pathSampleAt(ks, tau){                            // set the camera/sta
   const u = ks[i+1].t > ks[i].t ? (tau-ks[i].t)/(ks[i+1].t-ks[i].t) : 0;
   pathApplyCR(ks[Math.max(0,i-1)], ks[i], ks[i+1], ks[Math.min(n-1,i+2)], u);
 }
+/* ════════ ARC-LENGTH, FRAME-PACED playback (constant eased speed) ════════
+   The recorded per-segment durations were uneven (clamped), so Catmull-Rom speed = tangent/duration
+   jumped at every keyframe → start-stop. Instead we drive the spline by ARC LENGTH (the depth-relative
+   move + turn stored per keyframe) and step it by OUTPUT-FRAME index, so the preview and the rendered
+   sequence move identically at a constant, gently eased speed — independent of how the path was flown. */
+function pathArc(ks){
+  const n = ks.length, cum = new Float64Array(n); let total = 0, haveMetric = false;
+  for (let i = 1; i < n; i++){
+    const seg = (ks[i].move||0) + 0.6*(ks[i].rot||0);     // depth-relative distance + turn, as "length"
+    if (seg > 0) haveMetric = true;
+    cum[i] = (total += Math.max(seg, 1e-6));
+  }
+  if (!haveMetric){ for (let i=0;i<n;i++) cum[i]=i; total = Math.max(1, n-1); }   // old/loaded path → uniform spacing
+  return { cum, total };
+}
+const easeInOut = p => p<=0 ? 0 : p>=1 ? 1 : p*p*p*(p*(6.0*p-15.0)+10.0);   // smootherstep: gentle ends, flat middle
+function sampleArc(ks, arc, s){                            // place the camera at arc-length s ∈ [0,total]
+  const n = ks.length;
+  if (n === 1){ pathApplyCR(ks[0],ks[0],ks[0],ks[0],0); return; }
+  const cum = arc.cum;
+  s = Math.max(0, Math.min(arc.total, s));
+  let i = 0; while (i < n-2 && cum[i+1] < s) i++;          // segment [i, i+1]
+  const segLen = cum[i+1] - cum[i];
+  const u = segLen > 0 ? (s - cum[i]) / segLen : 0;
+  pathApplyCR(ks[Math.max(0,i-1)], ks[i], ks[i+1], ks[Math.min(n-1,i+2)], u);
+}
 /* light low-pass on the recorded keyframes to take the hand-jitter off the path (position + look
    direction). Endpoints fixed; a few mild passes — enough to de-jitter without cutting corners. */
 function smoothPath(ks, passes=2, alpha=0.4){
@@ -2034,14 +2060,19 @@ function smoothPath(ks, passes=2, alpha=0.4){
 }
 let playingPath = false;
 window.__stopPlay = () => { playingPath = false; };               // Esc / button aborts a preview
-window.__playPath = async function(data){                 // real-time replay
+window.__playPath = async function(data, opts){           // frame-paced arc-length replay (matches the render)
   const ks = (data && data.frames) || []; if (ks.length < 1) return { error:'empty path' };
-  modeOverride = 'deep'; const tEnd = ks[ks.length-1].t, t0 = performance.now(); playingPath = true;
+  opts = opts || {};
+  const fps = opts.fps || 30;
+  const nFrames = opts.frames ? Math.max(2, opts.frames|0)
+                              : Math.max(2, Math.round(((ks[ks.length-1].t)||((ks.length-1)*1.4)) * fps));
+  const arc = pathArc(ks), dur = nFrames / fps;            // preview real-time duration = the video's duration
+  modeOverride = 'deep'; const t0 = performance.now(); playingPath = true;
   return new Promise(res => { const step = () => {
     if (!playingPath) { res({ frames: ks.length, stopped:true }); return; }   // aborted
-    const tau = (performance.now()-t0)/1000;
-    if (tau >= tEnd) { pathSampleAt(ks, tEnd); playingPath = false; res({ frames: ks.length }); return; }
-    pathSampleAt(ks, tau); requestAnimationFrame(step);
+    const p = (performance.now()-t0)/1000 / dur;
+    if (p >= 1) { sampleArc(ks, arc, arc.total); playingPath = false; res({ frames: ks.length }); return; }
+    sampleArc(ks, arc, easeInOut(p) * arc.total); requestAnimationFrame(step);
   }; step(); });
 };
 window.__loadPath = () => new Promise(res => {             // file-picker → RETURN the path object (no play)
@@ -2083,15 +2114,16 @@ window.__renderPath = async function(data, opts){
     ks = ks.map(k=>({...k, cam:k.cam.slice(), phase:k.phase.slice()})); smoothPath(ks, passes, alpha);  // smooth a COPY
   }
   const fps = opts.fps||30, longEdge = opts.longEdge||1280, samples = opts.samples||8, tile = opts.tile||128;
-  const dur = ks[ks.length-1].t;
-  // `frames` (total output frames, resampled evenly over the whole flight) takes precedence over
-  // fps×duration — so a long recording doesn't explode into thousands of frames. Encode at any fps.
-  const nFrames = opts.frames ? Math.max(1, opts.frames|0) : Math.max(1, Math.round(dur*fps));
+  const arc = pathArc(ks);
+  // `frames` (total output frames) is the master clock: the path is stepped by ARC LENGTH across exactly
+  // this many frames, so motion speed = path/frames (constant, eased) — more frames = slower, smoother.
+  const nFrames = opts.frames ? Math.max(1, opts.frames|0)
+                              : Math.max(1, Math.round(((ks[ks.length-1].t)||((ks.length-1)*1.4))*fps));
   modeOverride = 'deep'; exporting = true; cancelRender = false;
   const files = [];
   try {
     for (let f = 0; f < nFrames; f++) {
-      pathSampleAt(ks, nFrames > 1 ? (f/(nFrames-1))*dur : 0);
+      sampleArc(ks, arc, nFrames > 1 ? easeInOut(f/(nFrames-1))*arc.total : 0);
       curOrbit = buildRefOrbit(camHP, cam.iters + 2); uploadOrbit(curOrbit); orbitDirty = false;
       const r = await renderFrameToBlob(longEdge, samples, tile, `frame ${f+1}/${nFrames} —`);
       if (r.cancelled) return { cancelled:true, framesRendered:f };   // no ZIP — aborted
