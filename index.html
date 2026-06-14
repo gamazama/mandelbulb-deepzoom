@@ -82,11 +82,17 @@
 <meta property="og:image" content="https://raw.githubusercontent.com/gamazama/mandelbulb-deepzoom/main/images/hero.jpg">
 <meta name="twitter:card" content="summary_large_image">
 <style>
+  :root { --panel-w: 400px; }   /* docked-panel width — single source for CSS + the JS render-aspect math (see PANEL_W) */
   html,body { margin:0; height:100%; background:#000; overflow:hidden; font:12px/1.4 monospace; color:#9fe; }
-  #gl { display:block; width:100vw; height:100vh; cursor:crosshair; image-rendering:pixelated; }
+  #gl { display:block; width:100vw; height:100vh; cursor:crosshair; image-rendering:auto; }
+  /* 1:1 centred mode: show the render frame at its true pixel size on the black field (width/height
+     set inline in px); the class only positions + outlines it. Higher specificity than #gl. */
+  #gl.fit1to1 { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+                width:auto; height:auto; image-rendering:auto; box-shadow:0 0 0 1px #234, 0 0 40px rgba(0,0,0,.85); }
   #hud { position:fixed; top:8px; left:8px; white-space:pre; pointer-events:none;
          text-shadow:0 0 3px #000; background:rgba(0,0,0,.35); padding:6px 8px; border-radius:4px; }
   #hud b { color:#fd6; }
+  #hud .hud-dim, #hud .hud-dim b { color:#8492a0; font-weight:normal; }   /* secondary settings dump — recedes behind mode/dist/gate */
   #help { position:fixed; bottom:8px; left:8px; color:#678; white-space:pre; }
   .warn { color:#f86; }
   .ok { color:#6f8; }
@@ -100,6 +106,7 @@
   #topbar div { color:#9ab; cursor:pointer; user-select:none; background:rgba(0,0,0,.4);
                 padding:3px 9px; border-radius:4px; font-size:12px; }
   #topbar div:hover { color:#cfe; background:rgba(20,30,38,.7); }
+  #topbar div.active { color:#cfe; background:#1d4d3f; box-shadow:inset 0 0 0 1px #2f7d65; }  /* which panel is open */
   .modal { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
            background:rgba(0,0,0,.72); z-index:10; }
   .modal .panel { max-width:760px; max-height:86vh; overflow:auto; background:#0c0f12; color:#bcd;
@@ -125,6 +132,8 @@
   .seg button.on { background:#1d4d3f; color:#cfe; border-color:#2f7d65; }
   .seg button:hover { color:#cfe; }
   .note { font-size:10.5px; line-height:1.4; color:#6b8294; margin:-3px 0 9px 88px; }
+  .ctl-sec { font-size:11px; color:#7fd1b0; letter-spacing:.08em; text-transform:uppercase; margin:15px 0 5px; }
+  .ctl-sec:first-child { margin-top:2px; }
   .btn { background:#16202a; color:#cde; border:1px solid #2a3a44; border-radius:5px; padding:7px 12px;
          font:inherit; font-size:12px; cursor:pointer; margin:3px 5px 3px 0; }
   .btn:hover { background:#1d4d3f; border-color:#2f7d65; }
@@ -134,6 +143,16 @@
                                border-radius:4px; padding:4px 6px; font:inherit; }
   #render .row { display:flex; align-items:center; gap:10px; margin:5px 0; font-size:12px; }
   #render .row label { flex:1; color:#9ab; }
+  /* ── controls / render / about docked as a right-hand FRAME (not a dimming overlay over the picture) ── */
+  #controls, #render, #about { inset:0 0 0 auto; background:transparent; align-items:stretch; justify-content:flex-end; }
+  #controls .panel, #render .panel, #about .panel {
+                     width:var(--panel-w); max-width:none; height:100vh; max-height:100vh; margin:0;
+                     padding:42px 22px 24px;                          /* clear the top-right toggle bar */
+                     border:0; border-left:1px solid #2a3a44; border-radius:0;
+                     box-shadow:-10px 0 40px rgba(0,0,0,.5); box-sizing:border-box; }
+  body.panel-open #gl:not(.fit1to1) { width:calc(100vw - var(--panel-w)); }   /* picture reflows left of the frame */
+  body.panel-open #gl.fit1to1 { left:calc(50% - var(--panel-w) / 2); }        /* recentre the 1:1 frame in the free area */
+  #topbar { z-index:12; }                                            /* keep toggles clickable over the frame */
 </style>
 </head>
 <body>
@@ -153,32 +172,32 @@
   <div id="ctlbody"></div>
   <h2>Keyboard shortcuts</h2>
   <p class="sub">WASD + Q/E fly · Shift boost · mouse look · Esc release &nbsp;·&nbsp; [ ] iters · I auto-iters ·
-  P mode · R res · N normals &nbsp;·&nbsp; −/= power · ,/. phase φ · ;/' phase θ &nbsp;·&nbsp;
+  P mode · R res · N normals &nbsp;·&nbsp; −/= power · ,/. phase θ · ;/' phase φ &nbsp;·&nbsp;
   C colour · 9/0 palette · F/G detail · L light · T/Y falloff &nbsp;·&nbsp; V gate · X export · M record · ? about</p>
 </div></div>
 <div id="render" class="modal"><div class="panel">
   <span class="x">✕</span>
   <h1>Render &amp; Export</h1>
-  <p class="sub" id="rstatus">…</p>
+  <p class="sub" id="rstatus">no path yet — Record or Load one</p>
   <h2>Still image (PNG)</h2>
   <div class="row"><label>resolution (long edge)</label><input id="r_res" type="number" value="2560" min="256" step="64"></div>
   <div class="row"><label>samples (quality)</label><input id="r_samp" type="number" value="16" min="1" max="128"></div>
   <button class="btn go" id="r_export">Export PNG</button>
   <h2>Camera path</h2>
   <button class="btn" id="r_rec">● Record</button>
-  <button class="btn" id="r_load">Load…</button>
-  <button class="btn" id="r_save">Save</button>
-  <button class="btn" id="r_play">▶ Preview</button>
   <div class="row"><label>smoothing — passes</label><input id="r_sp" type="number" value="2" min="0" max="12"></div>
   <div class="row"><label>strength (0–1)</label><input id="r_sa" type="number" value="0.4" min="0" max="1" step="0.05"></div>
   <button class="btn" id="r_smooth">Smooth path</button>
+  <button class="btn" id="r_play">▶ Preview</button>
+  <button class="btn" id="r_load">Load…</button>
+  <button class="btn" id="r_save">Save</button>
   <h2>Render path → video frames (.zip)</h2>
   <div class="row"><label>frames</label><input id="r_frames" type="number" value="180" min="1"></div>
   <div class="row"><label>resolution (long edge)</label><input id="r_pres" type="number" value="1920" min="256" step="64"></div>
   <div class="row"><label>samples / frame</label><input id="r_psamp" type="number" value="12" min="1" max="64"></div>
   <button class="btn go" id="r_render">Render → ZIP</button>
   <button class="btn" id="r_cancel">✖ Cancel</button>
-  <p class="sub">frames = seconds × fps. Encode the unzipped PNGs:<br>
+  <p class="sub">frames = seconds × fps. Cancel still saves the frames done so far; renders over 500&thinsp;MB split into numbered ZIPs.<br>Encode the unzipped PNGs:<br>
   <code style="color:#9ab">ffmpeg -framerate 30 -i frame_%05d.png -c:v libx264 -pix_fmt yuv420p out.mp4</code></p>
 </div></div>
 <div id="about" class="modal"><div class="panel">
@@ -239,7 +258,7 @@
   this stands on. &nbsp;Source &amp; verification harness:
   <a href="https://github.com/gamazama/mandelbulb-deepzoom">github.com/gamazama/mandelbulb-deepzoom</a></p>
 </div></div>
-<div id="help">click to capture mouse · WASD + Q/E fly · SHIFT boost · mouse look · ESC release
+<div id="help"><span id="lockcue">click to capture mouse</span> · WASD + Q/E fly · SHIFT boost · mouse look · ESC release
 <span style="color:#9ab">⚙ controls</span> for all settings + shortcuts · <span style="color:#9ab">🎬 render</span> to export &amp; record</div>
 <script>
 /* =============================================================================
@@ -306,10 +325,24 @@ vec2 hdrAdd(vec2 a, vec2 b) {
   }
 }
 vec2 hdrSub(vec2 a, vec2 b) { return hdrAdd(a, vec2(-b.x, b.y)); }
-vec2 hdrMul(vec2 a, vec2 b) { return hdrReduce(vec2(a.x * b.x, a.y + b.y)); }
+/* hdrMul fast path: both mantissas are normalized to |m| ∈ [1,2), so the product is in
+   [1,4) → at most one halving (never a multiply-up). Bit-exact with hdrReduce here but
+   without the log2/exp2. */
+vec2 hdrMul(vec2 a, vec2 b) {
+  float m = a.x * b.x; if (m == 0.0) return vec2(0.0, 0.0);
+  float e = a.y + b.y;
+  if (abs(m) >= 2.0) { m *= 0.5; e += 1.0; }
+  return vec2(m, e);
+}
 vec2 hdrMulF(vec2 h, float s) { return hdrReduce(vec2(h.x * s, h.y)); }
 vec2 hdrDivF(vec2 h, float s) { return hdrReduce(vec2(h.x / s, h.y)); }
-vec2 hdrRecip(vec2 h) { if (h.x == 0.0) return vec2(0.0, 0.0); return hdrReduce(vec2(1.0 / h.x, -h.y)); }
+/* hdrRecip fast path: h.x ∈ [1,2) ⇒ 1/h.x ∈ (0.5,1] → at most one doubling. The test
+   MUST be abs(r)<1.0 (not r<1.0): a mantissa of exactly −1 has |1/h.x|=1 and must not double. */
+vec2 hdrRecip(vec2 h) {
+  if (h.x == 0.0) return vec2(0.0, 0.0);
+  float r = 1.0 / h.x;
+  return abs(r) < 1.0 ? vec2(r * 2.0, -h.y - 1.0) : vec2(r, -h.y);
+}
 /* sqrt of a non-negative HDR value (mantissa positive). Force the exponent even so the
    halved exponent is an integer; mantissa stays in [1,4) → sqrt in [1,2). */
 vec2 hdrSqrt(vec2 h) {
@@ -515,23 +548,26 @@ OrbitOut pertOrbit(sampler2D orbit, int orbitLen, Hdr3 dc, int maxIter) {
       d = h3Add(so.delta, dc);
       m++; it++;
     }
-    RefIter rn = fetchRef(orbit, m);
+    /* only V (t0) and DR (t3) of the next ref are used here — fetch 2 texels, not 4 */
+    vec3 rnV = texelFetch(orbit, ivec2(m, 0), 0).xyz;
+    vec2 rnDR = texelFetch(orbit, ivec2(m, 3), 0).xy;
     vec3 df = h3ToVec3(d);
-    vec3 zf = rn.V + df;
+    vec3 zf = rnV + df;
     float z2 = dot(zf, zf);
     trap = min(trap, z2);                      // track min |z|² (sqrt once at the end)
     if (z2 > 4.0) { escaped = true; escR2 = z2; break; }
     if (z2 < dot(df, df) || m >= orbitLen - 1) {
-      d = h3FromVec3(zf - fetchRef(orbit, 0).V);
-      Ddr = hdrAdd(hdrSub(rn.DR, vec2(1.0, 0.0)), Ddr);
+      d = h3FromVec3(zf - texelFetch(orbit, ivec2(0, 0), 0).xyz);   // ref[0].V only (t0)
+      Ddr = hdrAdd(hdrSub(rnDR, vec2(1.0, 0.0)), Ddr);
       m = 0; rebases++;
     }
   }
-  RefIter rf = fetchRef(orbit, m);
-  vec2 q = hdrAdd(hdrMulF(h3DotF(rf.V, d), 2.0), h3Dot(d, d));
-  float r2f = sqrt(max(rf.R * rf.R + hdrToFloat(q), 0.0));
-  vec2 Dr = hdrDivF(q, r2f + rf.R);
-  vec2 drH = hdrAdd(rf.DR, Ddr);
+  vec4 rf0 = texelFetch(orbit, ivec2(m, 0), 0);          // V (xyz) + R (w) — t0 only
+  vec2 rfDR = texelFetch(orbit, ivec2(m, 3), 0).xy;       // DR — t3 only
+  vec2 q = hdrAdd(hdrMulF(h3DotF(rf0.xyz, d), 2.0), h3Dot(d, d));
+  float r2f = sqrt(max(rf0.w * rf0.w + hdrToFloat(q), 0.0));
+  vec2 Dr = hdrDivF(q, r2f + rf0.w);
+  vec2 drH = hdrAdd(rfDR, Ddr);
   float rF = max(r2f, 1e-12);
   vec2 de = hdrMul(hdrFromFloat(0.5 * rF * log(rF)), hdrRecip(drH));
   return OrbitOut(d, Dr, Ddr, de, it, rebases, escaped, sqrt(trap), sqrt(escR2));
@@ -1404,7 +1440,8 @@ const cam = { pos:[0,0,2.6], yaw:-Math.PI/2, pitch:0, power:8, iters:14, baseSpe
 let camHP = cam.pos.map(hp.fromNum);            // [DS-SEAM] authoritative position
 let smoothedDist = 1.0;
 let modeOverride = 'auto';                      // 'auto' | 'deep' | 'f32'
-let deepDiv = 4;                                // deep-mode resolution divisor
+let frameLong = 320;                            // deep-mode ABSOLUTE render long-edge (px); display upscales it
+let view1to1 = false;                           // true = show the frame at true pixel size, centred (no stretch)
 let autoIters = true;                           // key I: scale iterations with depth
 let normalMode = 2;                             // key N: 0 screen-space (0 orbits) | 1 3-tap (biased) | 2 4-tap (default)
                                                 // 4-tap tetrahedron = symmetric, reference-correct DE normal.
@@ -1423,17 +1460,17 @@ addEventListener('keydown',e=>{ keys[e.code]=true;
   if(e.code==='KeyI') autoIters=!autoIters;
   if(e.code==='KeyN'){ normalMode = (normalMode+1)%3; accumReset=true; }  // screen / 3-tap / 4-tap
   if(e.code==='KeyP'){ modeOverride = modeOverride==='auto'?'deep':modeOverride==='deep'?'f32':'auto'; orbitDirty=true; }
-  if(e.code==='KeyR'){ deepDiv = deepDiv>=8?1:deepDiv*2; accumReset=true; }  // ÷1 clamped (TDR guard)
+  if(e.code==='KeyR'){ const P=[360,540,720,1080,1440]; const i=P.indexOf(frameLong); frameLong=P[(i+1)%P.length]; accumReset=true; }  // cycle live frame size
   if(e.key==='-'||e.key==='_') setPower(nPower-1);          // power n  (−/=)
   if(e.key==='='||e.key==='+') setPower(nPower+1);
-  if(e.key===',') setPhase(-0.06, 0);                       // phase φ  (,/.)
+  if(e.key===',') setPhase(-0.06, 0);                       // phase θ  (,/.)
   if(e.key==='.') setPhase( 0.06, 0);
-  if(e.key===';') setPhase(0, -0.06);                       // phase θ  (;/')
+  if(e.key===';') setPhase(0, -0.06);                       // phase φ  (;/')
   if(e.key==="'") setPhase(0,  0.06);
   if(e.code==='KeyC'){ colorMode=(colorMode+1)%3; accumReset=true; }   // plain / iteration / orbit-trap
   if(e.key==='9'){ colorScale=Math.max(0.05,colorScale/1.3); accumReset=true; }  // palette frequency
   if(e.key==='0'){ colorScale=Math.min(20,colorScale*1.3); accumReset=true; }
-  if(e.code==='KeyX' && deepActive && !exporting) window.__export(2560, 16);     // hi-res PNG export
+  if(e.code==='KeyX' && deepActive && !exporting){ closePanels(); window.__export(2560, 16); }  // hi-res PNG export (close panels first so the canvas reflows to full width)
   if(e.code==='KeyF'){ surfMul=Math.max(0.25,surfMul/1.5); accumReset=true; }    // softer (blobbier)
   if(e.code==='KeyG'){ surfMul=Math.min(256,surfMul*1.5); accumReset=true; }     // sharper (closer to surface)
   if(e.code==='KeyV'){ gateOn=!gateOn; if(!gateOn){ gate.relT=NaN; } }            // live gate on/off
@@ -1447,20 +1484,32 @@ addEventListener('keydown',e=>{ keys[e.code]=true;
   if(e.key==='Escape' && aboutEl && aboutEl.style.display==='flex') toggleAbout();
 });
 const aboutEl = document.getElementById('about');
-function toggleAbout(){ if(aboutEl) aboutEl.style.display = aboutEl.style.display==='flex' ? 'none' : 'flex'; }
-document.getElementById('aboutbtn').addEventListener('click', toggleAbout);
-aboutEl.addEventListener('click', e => { if(e.target===aboutEl || e.target.className==='x') toggleAbout(); });
+function toggleAbout(){ openPanel(aboutEl); }                          // openPanel: defined below (hoisted)
+document.getElementById('aboutbtn').addEventListener('click', ()=>openPanel(aboutEl));
+aboutEl.addEventListener('click', e => { if(e.target.className==='x') closePanels(); });
 
 /* ════════ INTERACTIVE UI PANELS — the keyboard shortcuts as buttons/sliders ════════ */
 const $id = id => document.getElementById(id);
 const CTLS = [
+  {t:'sec', l:'Mode & quality'},
   {t:'seg', l:'mode',     g:()=>modeOverride, opts:[['auto','auto'],['deep','deep'],['f32','f32']], s:v=>{modeOverride=v; orbitDirty=true;}},
-  {t:'seg', l:'res',      g:()=>deepDiv, opts:[['÷8',8],['÷4',4],['÷2',2]], s:v=>{deepDiv=v; accumReset=true;}},
+  {t:'rng', l:'frame px', note:'Live deep-render frame size (long edge, in pixels). The frame is rendered at this size and scaled to fill the window — lower it for speed (image gets softer, not blocky), raise it for sharpness. Capped to the display resolution; clamped at extreme zoom to stay under the GPU watchdog.', g:()=>frameLong, min:240,max:2560,step:40, fmt:v=>v+'px', s:v=>{frameLong=v; accumReset=true;}},
+  {t:'tog', l:'1:1 view', note:'Show the render frame at its true pixel size, centred on a black field, instead of stretching it to fill the window. Crisp (no upscaling) — pair with a smaller frame size for a fast, sharp preview.', g:()=>view1to1, s:v=>{view1to1=v; accumReset=true;}},
   {t:'rng', l:'iters',    g:()=>cam.iters, min:4,max:160,step:1, s:v=>{cam.iters=v; orbitDirty=true;}},
   {t:'tog', l:'auto-iters', g:()=>autoIters, s:v=>{autoIters=v;}},
+  {t:'tog', l:'BLA', note:'Bivariate linear approximation — skips runs of perturbation iterations for a big speedup at deep zoom (accuracy-bounded, τ=1e-5). Builds a heavier shader on first enable, so expect a brief one-time pause.', g:()=>blaEnabled, s:v=>{
+      const needCompile = v && !deepProgBla && !blaCompileErr;   // first enable triggers a blocking compile
+      const finish = ()=>{ window.__setBla(v); if(needCompile && loading) loading.style.display='none';
+        if(v && window.__blaErr()) alert('BLA compile failed:\n'+window.__blaErr()); syncControls(); };
+      if(needCompile){ showProg('<span class="spin">◓</span> compiling BLA accelerator…<br><small style="color:#9ab">one-time — heavier shader</small>'); setTimeout(finish, 30); }  // let the overlay paint before the sync compile
+      else finish();
+    }},
+  {t:'tog', l:'gate', note:'Live ground-truth check — GPU perturbation vs an independent CPU referee, shown in the HUD (relT ✓/✗). A 1×1 readback per ~0.5 s; turn off for the smoothest flying/recording.', g:()=>gateOn, s:v=>{gateOn=v; if(!v) gate.relT=NaN;}},
+  {t:'sec', l:'Formula'},
   {t:'rng', l:'power n',  g:()=>nPower, min:2,max:16,step:1, s:v=>window.__setPower(v)},
   {t:'rng', l:'phase φ',  g:()=>phasePhi, min:0,max:6.2832,step:0.02, fmt:v=>v.toFixed(2), s:v=>{phasePhi=v; orbitDirty=true;}},
   {t:'rng', l:'phase θ',  g:()=>phaseTheta, min:0,max:6.2832,step:0.02, fmt:v=>v.toFixed(2), s:v=>{phaseTheta=v; orbitDirty=true;}},
+  {t:'sec', l:'Look'},
   {t:'seg', l:'normals',  g:()=>normalMode, opts:[['screen',0],['3-tap',1],['4-tap',2]], s:v=>{normalMode=v; accumReset=true;}},
   {t:'seg', l:'colour',   g:()=>colorMode, opts:[['plain',0],['iter',1],['trap',2]], s:v=>{colorMode=v; accumReset=true;}},
   {t:'rng', l:'palette',  g:()=>colorScale, min:0.1,max:16,step:0.1, fmt:v=>v.toFixed(1), s:v=>{colorScale=v; accumReset=true;}},
@@ -1468,12 +1517,13 @@ const CTLS = [
   {t:'rng', l:'detail',   g:()=>surfMul, min:0.25,max:32,step:0.25, fmt:v=>v.toFixed(2), s:v=>{surfMul=v; accumReset=true;}},
   {t:'seg', l:'lighting', g:()=>lightMode, opts:[['direct',0],['lamp',1],['both',2]], s:v=>{lightMode=v; accumReset=true;}},
   {t:'rng', l:'falloff',  g:()=>falloffMul, min:0.5,max:32,step:0.5, fmt:v=>v.toFixed(1), s:v=>{falloffMul=v; accumReset=true;}},
-  {t:'tog', l:'gate',     g:()=>gateOn, s:v=>{gateOn=v; if(!v) gate.relT=NaN;}},
+  {t:'sec', l:'Recording'},
   {t:'rng', l:'kf spacing', note:'Recording only — higher = fewer, sparser keyframes (records farther apart as you fly). Sit still to decide; nothing records until you move.', g:()=>kfSpacing, min:0.3,max:5,step:0.1, fmt:v=>v.toFixed(1)+'×', s:v=>{kfSpacing=v;}},
 ];
 (function buildControls(){
   const body = $id('ctlbody');
   for (const c of CTLS){
+    if (c.t==='sec'){ const h=document.createElement('div'); h.className='ctl-sec'; h.textContent=c.l; body.appendChild(h); continue; }
     const row=document.createElement('div'); row.className='ctl';
     const lbl=document.createElement('span'); lbl.className='lbl'; lbl.textContent=c.l; row.appendChild(lbl);
     if (c.t==='rng'){
@@ -1502,16 +1552,36 @@ const CTLS = [
   }
 })();
 function syncControls(){
-  for (const c of CTLS){ const v=c.g();
+  for (const c of CTLS){ if(!c.g) continue; const v=c.g();
     if (c.t==='rng'){ if(c._inp){ c._inp.value=v; c._val.textContent=(c.fmt||(y=>y))(v); } }
     else if (c.t==='seg'){ c._btns.forEach((bn,i)=>bn.classList.toggle('on', c.opts[i][1]===v)); }
     else if (c.t==='tog'){ c._btns.forEach((bn,i)=>bn.classList.toggle('on', c._vals[i]===v)); }
   }
 }
-const ctlEl=$id('controls'), renderEl=$id('render'); let controlsOpen=false;
-$id('ctlbtn').addEventListener('click', ()=>{ const open=ctlEl.style.display==='flex'; ctlEl.style.display=open?'none':'flex'; controlsOpen=!open; if(controlsOpen) syncControls(); });
-ctlEl.addEventListener('click', e=>{ if(e.target===ctlEl||e.target.className==='x'){ ctlEl.style.display='none'; controlsOpen=false; } });
-setInterval(()=>{ if(controlsOpen) syncControls(); }, 150);    // reflect key-driven changes live
+const ctlEl=$id('controls'), renderEl=$id('render');
+const PANEL_W = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--panel-w')) || 400;  // docked-panel width (CSS --panel-w) — feeds the render-aspect math
+const isOpen = el => el.style.display==='flex';                       // panel open ⇔ its frame is shown
+/* ── unified docked-panel manager: controls / render / about share the right-hand frame, are mutually
+   exclusive, and reflow the picture (body.panel-open) rather than covering it. No backdrop-click close. */
+function _panels(){ return [ctlEl, renderEl, aboutEl]; }
+function _panelBtns(){ return [[ctlEl,$id('ctlbtn')], [renderEl,$id('renderbtn')], [aboutEl,$id('aboutbtn')]]; }
+function refreshPanelState(){
+  document.body.classList.toggle('panel-open', _panels().some(isOpen));
+  _panelBtns().forEach(([p,b])=>{ if(b) b.classList.toggle('active', isOpen(p)); });   // light the open panel's toggle
+  accumReset = true;                                  // canvas reflows (width changes) → re-render the still at the new aspect
+}
+function closePanels(){ _panels().forEach(p=>{ if(p) p.style.display='none'; }); refreshPanelState(); }
+function openPanel(el){
+  const wasOpen = isOpen(el);
+  _panels().forEach(p=>{ if(p) p.style.display='none'; });            // mutually exclusive — one frame at a time
+  if(!wasOpen) el.style.display='flex';
+  refreshPanelState();
+  if(isOpen(ctlEl)) syncControls();
+  if(el===renderEl && isOpen(renderEl)){ recLabel(); rstat(pathInfo(curPath())); }
+}
+$id('ctlbtn').addEventListener('click', ()=>openPanel(ctlEl));
+ctlEl.addEventListener('click', e=>{ if(e.target.className==='x') closePanels(); });
+setInterval(()=>{ if(isOpen(ctlEl)) syncControls(); }, 150);    // reflect key-driven changes live (reads the DOM, no mirrored flag)
 
 /* ── render / export panel ── */
 let uiPath=null;
@@ -1519,16 +1589,20 @@ function curPath(){ return uiPath || window.__lastPath(); }
 function pathInfo(p){ const n=p&&p.frames?p.frames.length:0; const last=n?(p.frames[n-1].t||0):0; return n ? `path: ${n} keyframes${last?`, ${last.toFixed(1)} s`:''}` : 'no path yet — Record or Load one'; }
 function rstat(m){ const e=$id('rstatus'); if(e) e.textContent=m; }
 function recLabel(){ $id('r_rec').textContent = (window.__recording&&window.__recording()) ? '■ Stop & save' : '● Record'; }
-$id('renderbtn').addEventListener('click', ()=>{ const open=renderEl.style.display==='flex'; renderEl.style.display=open?'none':'flex'; if(!open){ recLabel(); rstat(pathInfo(curPath())); } });
-renderEl.addEventListener('click', e=>{ if(e.target===renderEl||e.target.className==='x') renderEl.style.display='none'; });
-$id('r_export').onclick=()=>{ renderEl.style.display='none'; window.__export(+$id('r_res').value, +$id('r_samp').value); };
+$id('renderbtn').addEventListener('click', ()=>openPanel(renderEl));
+renderEl.addEventListener('click', e=>{ if(e.target.className==='x') closePanels(); });
+$id('r_export').onclick=()=>{ if(!deepActive){ rstat('Export needs deep mode — zoom past 1e-4, or press P to force it'); return; }
+  if(exporting){ rstat('busy — a render is already running'); return; }
+  closePanels(); window.__export(+$id('r_res').value, +$id('r_samp').value); };
 $id('r_rec').onclick=()=>{ const rec=window.__recordToggle(); recLabel(); if(!rec){ uiPath=window.__lastPath(); rstat(pathInfo(uiPath)); } else rstat('recording — fly, then Stop'); };
 $id('r_load').onclick=async()=>{ const d=await window.__loadPath(); if(d){ uiPath=d; rstat('loaded · '+pathInfo(d)); } };
 $id('r_save').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length) window.__savePath(p); else rstat('nothing to save'); };
-$id('r_play').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length){ renderEl.style.display='none'; window.__playPath(p, { frames:+$id('r_frames').value, fps:30 }); } else rstat('no path — Record or Load first'); };
+$id('r_play').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length){ closePanels(); window.__playPath(p, { frames:+$id('r_frames').value, fps:30 }); } else rstat('no path — Record or Load first'); };
 $id('r_smooth').onclick=()=>{ const p=curPath(); if(p&&p.frames&&p.frames.length){ window.__smoothPath(p, +$id('r_sp').value, +$id('r_sa').value); uiPath=p; rstat('smoothed · '+pathInfo(p)); } else rstat('no path to smooth'); };
 $id('r_render').onclick=()=>{ const p=curPath(); if(!p||!p.frames||!p.frames.length){ rstat('no path — Record or Load first'); return; }
-  renderEl.style.display='none'; window.__renderPath(p, { frames:+$id('r_frames').value, longEdge:+$id('r_pres').value, samples:+$id('r_psamp').value }); };
+  if(!deepReady){ rstat('deep renderer still compiling — try again in a moment'); return; }
+  if(exporting){ rstat('busy — a render is already running'); return; }
+  closePanels(); window.__renderPath(p, { frames:+$id('r_frames').value, longEdge:+$id('r_pres').value, samples:+$id('r_psamp').value }); };
 $id('r_cancel').onclick=()=>window.__cancelRender();
 function setPower(n){
   n = Math.max(2, Math.min(16, n|0));
@@ -1545,6 +1619,13 @@ function setPhase(dth, dph){
 }
 addEventListener('keyup',e=>{ keys[e.code]=false; });
 canvas.addEventListener('click',()=>canvas.requestPointerLock());
+/* live mouse-capture cue: the help line's lead phrase reflects whether the fly camera holds the pointer */
+document.addEventListener('pointerlockchange',()=>{
+  const cue=document.getElementById('lockcue'); if(!cue) return;
+  const locked=document.pointerLockElement===canvas;
+  cue.textContent = locked ? '✦ flying — ESC to release' : 'click to capture mouse';
+  cue.style.color = locked ? '#7fd1b0' : '';
+});
 addEventListener('mousemove',e=>{ if(document.pointerLockElement!==canvas) return;
   cam.yaw   += e.movementX*0.0009;
   cam.pitch  = Math.max(-1.55,Math.min(1.55, cam.pitch - e.movementY*0.0009));
@@ -1808,7 +1889,8 @@ window.__moveAlong = (dir, dist)=>{               // exact HP move (smoke-test d
   for(let j=0;j<3;j++) camHP[j] += hp.fromNum(dir[j]*dist);
   cam.pos = camHP.map(hp.toNum); orbitDirty=true;
 };
-window.__setDiv = (d)=>{ deepDiv = d; };          // perf-matrix handle
+window.__setDiv = (d)=>{ frameLong = Math.max(2, Math.round(Math.max(window.innerWidth,window.innerHeight)/Math.max(1,d))); };  // perf-matrix handle (divisor → absolute frame; window, not canvas — 1:1 mode resizes the canvas)
+window.__setFrame = (px)=>{ frameLong = Math.max(2, px|0); accumReset = true; };  // absolute live frame long-edge
 window.__setNormalMode = (m)=>{ normalMode = m; };  // 0 screen-space / 1 3-tap / 2 4-tap
 window.__setBisect = (n)=>{ bisectMax = n; };      // bisection iteration cap
 window.__setPower = (n)=>{ nPower=Math.max(2,Math.min(16,n|0)); cam.power=nPower; binomN=binomPad(nPower); binomN1=binomPad(nPower-1); orbitDirty=true; };
@@ -1824,7 +1906,7 @@ window.__forceRebuild = (b)=>{ forceRebuild = !!b; };
 window.__setAccum = (b)=>{ accumEnabled = !!b; accumReset = true; };  // progressive-still toggle
 
 /* ════════ HI-RES EXPORT (TDR-safe tiled render → PNG) ════════
-   The live view is clamped to ÷div for the GPU watchdog, so it can't show full resolution. Export
+   The live view is clamped to a small frame (frameLong) for the GPU watchdog, so it can't show full resolution. Export
    renders the CURRENT view at an arbitrary resolution by TILING (each tile a small draw, well under
    the ~2 s watchdog), accumulating `samples` sub-pixel-jittered passes per pixel (denoise + AA), then
    downloads a PNG. Uses the current camera / power / phase / colour / normals. */
@@ -1838,9 +1920,8 @@ function showProg(html){ if(loading){ loading.style.display='flex'; loading.quer
 async function renderFrameToBlob(longEdge, samples, tile, label){
   longEdge = longEdge || 2560; samples = Math.max(1, samples||16); tile = tile || 128;
   const cW = Math.max(2,canvas.clientWidth), cH = Math.max(2,canvas.clientHeight), aspect = cW/cH;
-  let W = Math.round(longEdge), H = Math.round(longEdge/aspect);
-  if (aspect < 1) { H = Math.round(longEdge); W = Math.round(longEdge*aspect); }
-  W -= W % 2; H -= H % 2;
+  let { w:W, h:H } = longEdgeToWH(longEdge, aspect);
+  W -= W % 2; H -= H % 2;                            // tiling needs even dimensions
   const {fwd,right,up} = basis();
   const light = keyLightDir(right, up, fwd);   // camera-relative key — stable modelling as you fly
   const aT = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, aT);
@@ -1937,7 +2018,7 @@ const SEG_BASE=1.4, SEG_MIN=0.7, SEG_MAX=3.0;    // cinematic seconds per segmen
 function isFlying(){ return !!(keys['KeyW']||keys['KeyS']||keys['KeyA']||keys['KeyD']||keys['KeyE']||keys['KeyQ']); }
 function pushKeyframe(move, rot){
   recPath.push({ cam:camHP.map(String), yaw:cam.yaw, pitch:cam.pitch,
-    iters:cam.iters, power:nPower, phase:[phaseTheta,phasePhi], div:deepDiv, light:lightMode,
+    iters:cam.iters, power:nPower, phase:[phaseTheta,phasePhi], light:lightMode,
     falloff:falloffMul, color:colorMode, cscale:colorScale, surf:surfMul, move, rot });
   kfLastHP = camHP.slice(); kfLastYaw = cam.yaw; kfLastPitch = cam.pitch;
 }
@@ -2086,9 +2167,10 @@ window.__loadPathFile = () => window.__loadPath().then(d => d ? window.__playPat
 window.__savePath = (data, name) => { if(!data||!data.frames) return;                          // download a path object
   downloadJSON(data, name || `mandelbulb_path_${data.frames.length}f_${Date.now()}.json`); };
 
-/* ════════ RENDER A PATH → image sequence (ZIP of numbered PNGs, one download, no deps) ════════
+/* ════════ RENDER A PATH → image sequence (ZIP(s) of numbered PNGs, no deps) ════════
    Resamples the path at `fps` (camera BigInt-interpolated), renders each frame at export quality
-   (tiled, TDR-safe), and packs the PNGs into a single ZIP. Feed the frames to ffmpeg for video. */
+   (tiled, TDR-safe), and packs the PNGs into ZIP(s) — split at ~500 MB. Cancelling (Esc) still
+   downloads the frames completed so far (named `_partial`). Feed the frames to ffmpeg for video. */
 const crcTable=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n;
   for(let k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; t[n]=c>>>0; } return t; })();
 function crc32(u8){ let c=0xFFFFFFFF; for(let i=0;i<u8.length;i++) c=(c>>>8)^crcTable[(c^u8[i])&0xFF]; return (c^0xFFFFFFFF)>>>0; }
@@ -2104,6 +2186,29 @@ function makeZip(files){                                   // store method (PNGs
   let cdLen=0; for(const c of central){ parts.push(c); cdLen+=c.length; }
   parts.push(cat([u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(cdLen),u32(off),u16(0)]));
   return new Blob(parts, {type:'application/zip'});
+}
+/* Pack files into ZIP(s) and download. A single sequence can be many GB, so we cap each ZIP at
+   ~500 MB and split across `_partNNofMM` files — this also keeps every archive well under the
+   store-ZIP 32-bit (4 GB) size/offset limit. Downloads are staggered so the browser doesn't
+   collapse the multi-file save into one. Returns the number of ZIPs written. */
+const ZIP_SPLIT_BYTES = 500 * 1024 * 1024;
+async function packAndDownloadZips(files, baseName){
+  if (!files.length) return 0;
+  const parts = []; let cur = [], curBytes = 0;
+  for (const f of files){
+    const fBytes = f.data.length + f.name.length * 2 + 90;          // data + LFH + central-dir overhead (conservative)
+    if (cur.length && curBytes + fBytes > ZIP_SPLIT_BYTES){ parts.push(cur); cur = []; curBytes = 0; }
+    cur.push(f); curBytes += fBytes;
+  }
+  if (cur.length) parts.push(cur);
+  const n = parts.length, pad = String(n).length;
+  for (let i = 0; i < n; i++){
+    const tag = n === 1 ? '' : `_part${String(i+1).padStart(pad,'0')}of${n}`;
+    showProg(`<span class="spin">◓</span> packing ZIP ${i+1}/${n}…`);
+    dlBlob(makeZip(parts[i]), `${baseName}${tag}.zip`);
+    if (i < n-1) await new Promise(r => setTimeout(r, 500));        // stagger so all parts actually download
+  }
+  return n;
 }
 window.__renderPath = async function(data, opts){
   if (!deepReady || exporting) return { error:'not ready / busy' };
@@ -2121,18 +2226,21 @@ window.__renderPath = async function(data, opts){
                               : Math.max(1, Math.round(((ks[ks.length-1].t)||((ks.length-1)*1.4))*fps));
   modeOverride = 'deep'; exporting = true; cancelRender = false;
   const files = [];
+  let cancelled = false;
   try {
     for (let f = 0; f < nFrames; f++) {
       sampleArc(ks, arc, nFrames > 1 ? easeInOut(f/(nFrames-1))*arc.total : 0);
       curOrbit = buildRefOrbit(camHP, cam.iters + 2); uploadOrbit(curOrbit); orbitDirty = false;
       const r = await renderFrameToBlob(longEdge, samples, tile, `frame ${f+1}/${nFrames} —`);
-      if (r.cancelled) return { cancelled:true, framesRendered:f };   // no ZIP — aborted
+      if (r.cancelled) { cancelled = true; break; }   // stop early — still pack the frames done so far
       files.push({ name:`frame_${String(f).padStart(5,'0')}.png`, data:new Uint8Array(await r.blob.arrayBuffer()) });
-      showProg(`<span class="spin">◓</span> rendering path… frame ${f+1}/${nFrames}<br><small style="color:#9ab">${longEdge}px ×${samples} — press Esc to cancel · a ZIP downloads when done</small>`);
+      showProg(`<span class="spin">◓</span> rendering path… frame ${f+1}/${nFrames}<br><small style="color:#9ab">${longEdge}px ×${samples} — press Esc to cancel · ZIP downloads when done</small>`);
     }
-    showProg(`packing ${nFrames} frames…`);
-    dlBlob(makeZip(files), `mandelbulb_path_${nFrames}f_${fps}fps_${longEdge}px.zip`);
-    return { frames:nFrames, fps, longEdge, samples };
+    if (!files.length) return { cancelled, framesRendered:0 };   // nothing completed → nothing to save
+    const baseName = `mandelbulb_path_${files.length}f_${fps}fps_${longEdge}px${cancelled?'_partial':''}`;
+    showProg(`<span class="spin">◓</span> packing ${files.length} frame${files.length>1?'s':''}${cancelled?' (cancelled)':''}…`);
+    const zips = await packAndDownloadZips(files, baseName);
+    return { frames:files.length, fps, longEdge, samples, cancelled, zips };
   } finally { exporting = false; cancelRender = false; if (loading) { loading.style.display='none'; loading.style.background=''; } }
 };
 window.__renderPathFile = (opts) => new Promise(res => {   // file-picker → render to ZIP
@@ -2143,18 +2251,42 @@ window.__renderPathFile = (opts) => new Promise(res => {   // file-picker → re
   inp.click();
 });
 
+/* map a long-edge length + aspect (=w/h) to integer (w,h), where the long edge is the longer side.
+   Shared by the live frame (frame()) and the tiled export (renderFrameToBlob) so the two can't drift. */
+function longEdgeToWH(longEdge, aspect){
+  return { w: Math.max(2, Math.round(aspect >= 1 ? longEdge : longEdge * aspect)),
+           h: Math.max(2, Math.round(aspect >= 1 ? longEdge / aspect : longEdge)) };
+}
 /* resize the drawing buffer ONLY when it changes — assigning canvas.width every frame (even to the
    same value) clears the buffer and can flicker. */
 function setCanvasSize(W,H){ if (canvas.width!==W) canvas.width=W; if (canvas.height!==H) canvas.height=H; }
+/* CSS presentation of the drawing buffer: either stretched to fill the window (default) or shown at
+   true pixel size centred on the black field (1:1 mode). Buffer W,H are device px; divide by dpr so one
+   render pixel maps to one physical pixel. Only restyle on change to avoid layout thrash. */
+let dispCss = '';
+function updateCanvasDisplay(W,H){
+  if (view1to1) {
+    const dpr = window.devicePixelRatio || 1;
+    const cw = Math.max(1, Math.round(W/dpr)), ch = Math.max(1, Math.round(H/dpr));
+    const key = '1:'+cw+'x'+ch;
+    if (dispCss===key) return; dispCss=key;
+    canvas.classList.add('fit1to1');
+    canvas.style.width = cw+'px'; canvas.style.height = ch+'px';
+  } else {
+    if (dispCss==='full') return; dispCss='full';
+    canvas.classList.remove('fit1to1');
+    canvas.style.width = ''; canvas.style.height = '';   // back to the #gl 100vw/100vh rule
+  }
+}
 let last=performance.now(), fps=0, frameN=0, curOrbit=null, deepActive=false;
 let orbitDirty=true;                              // rebuild the reference orbit only when this is set
 let accumReset=true;                              // restart progressive accumulation (camera moved)
 /* progressive TEMPORAL accumulation when idle (TSAA-style): each idle frame re-renders the deep
-   view at the live ÷div res but with a sub-pixel Halton JITTER, and averages it into a float
+   view at the live frame res but with a sub-pixel Halton JITTER, and averages it into a float
    buffer (running mean via constant-alpha blend). The average SUPERSAMPLES (anti-aliases) and —
    the real win at depth — DENOISES the near-critical per-pixel speckle, converging visibly over
-   ~tens of frames. Every draw is a single ÷div frame ⇒ TDR-safe; sharpens on pause, snaps back to
-   live ÷div on any input. (A spatial-tile variant gave full-res but SNAPPED with no visible
+   ~tens of frames. Every draw is a single small frame ⇒ TDR-safe; sharpens on pause, snaps back to
+   the live frame on any input. (A spatial-tile variant gave full-res but SNAPPED with no visible
    convergence and didn't denoise — temporal is what the eye wants here.) */
 let accumEnabled=true, idleFrames=0, accumN=0;
 const IDLE_HOLD=10, ACCUM_MAX=64;                 // begin after IDLE_HOLD idle frames; cap samples
@@ -2222,14 +2354,30 @@ function frame(now){
   if (recording) capturePathFrame();             // camera-path recording (sparse, movement-driven)
 
   /* --- render --- */
-  /* ⚠ TDR guard: deep full-res frames at depth-scaled iteration counts exceed the ~2 s
-     Windows GPU watchdog (measured: ÷1 ≈ 1-2 fps → device reset, desktop freeze).
-     Clamp ÷1→÷2 in deep mode; below 1e-30 (iters ≥ ~73) clamp ÷2→÷4 as well. */
-  if (deepActive && deepDiv < 2) deepDiv = 2;
-  if (deepActive && deepDiv < 4 && smoothedDist < 1e-30 && smoothedDist > 0) deepDiv = 4;
-  const div = deepActive ? deepDiv : 1;
-  const w = Math.max(2, Math.floor(canvas.clientWidth  / div));
-  const h = Math.max(2, Math.floor(canvas.clientHeight / div));
+  /* live render size: ABSOLUTE long-edge (frameLong) in deep mode, native window in f32 baseline.
+     CSS scales the frame to the window, so frameLong trades sharpness for speed directly.
+     ⚠ TDR guard: the live deep frame is ONE non-tiled draw and must finish under the ~2 s Windows
+     GPU watchdog. Per-pixel cost climbs with iteration depth, so cap the long edge — never above the
+     native display, and harder at extreme zoom (measured: large deep frames → device reset/freeze). */
+  /* base aspect + native cap on the VIEWPORT (minus the docked panel), NOT canvas.clientWidth — in
+     1:1 mode the canvas CSS size IS the frame, which would make this circular. */
+  const panelW = document.body.classList.contains('panel-open') ? PANEL_W : 0;
+  const availW = Math.max(2, window.innerWidth - panelW), availH = Math.max(2, window.innerHeight);
+  const aspect = availW / availH, nativeLong = Math.max(availW, availH);
+  /* ⚠ TDR guard: the live deep frame is ONE non-tiled draw and must finish under the ~2 s Windows
+     watchdog (measured: a large deep draw → 1-2 fps → device reset, desktop freeze). Per-pixel cost
+     climbs with iteration depth, so cap the long edge progressively as the zoom deepens — a raised
+     "frame px" slider can't push the single draw back into the freeze regime. (Full-res deep stills
+     stay available via the TILED PNG export, which is watchdog-safe.) */
+  let cap = nativeLong;                                                          // no upscaling past the on-screen area
+  if (deepActive && smoothedDist > 0) {
+    if      (smoothedDist < 1e-30) cap = Math.min(cap, 720);                     // extreme zoom (iters ≥ ~73)
+    else if (smoothedDist < 1e-12) cap = Math.min(cap, 1080);                    // deep
+    else if (smoothedDist < 1e-4)  cap = Math.min(cap, 1440);                    // mid-deep
+  }
+  const longE = Math.max(2, Math.min(deepActive ? frameLong : nativeLong, cap));
+  const { w, h } = longEdgeToWH(longE, aspect);
+  updateCanvasDisplay(w, h);                    // stretch-to-fill vs centred 1:1 presentation
   const light = keyLightDir(right, up, fwd);   // camera-relative key — stable modelling as you fly
 
   /* idle detection for progressive accumulation: any view change set accumReset (movement →
@@ -2255,9 +2403,9 @@ function frame(now){
     gl.uniform2f(x.res,w,h);
     const accumulating = accumEnabled && floatBlend && idleFrames >= IDLE_HOLD && accumN < ACCUM_MAX;
     if (accumulating) {
-      /* TEMPORAL accumulation: render one jittered ÷div sample into the float buffer as a running
+      /* TEMPORAL accumulation: render one jittered frame-res sample into the float buffer as a running
          mean (constant-alpha blend, weight 1/(N+1)), then blit the average to the canvas. Each
-         draw is a single ÷div frame ⇒ TDR-safe; the average denoises the speckle + anti-aliases,
+         draw is a single small frame ⇒ TDR-safe; the average denoises the speckle + anti-aliases,
          converging visibly over ACCUM_MAX samples. */
       ensureAccum(w,h);
       const jx = (halton(accumN+1,2)-0.5)/h, jy = (halton(accumN+1,3)-0.5)/h;   // ±0.5 render-pixel
@@ -2283,7 +2431,7 @@ function frame(now){
       gl.blitFramebuffer(0,0,w,h, 0,0,w,h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     } else {
-      /* live ÷div render straight to the canvas */
+      /* live frame-res render straight to the canvas */
       gl.uniform2f(x.jitter, 0, 0);
       setCanvasSize(w,h);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -2327,11 +2475,11 @@ function frame(now){
     (deepActive
       ? `gate       ${!gateOn?'<span style="color:#678">off (V)</span>':isNaN(gate.relT)?'…':`relT <b class="${gateOK?'ok':'warn'}">${gate.relT.toExponential(1)}</b> (GPU ${gate.tGPU.toExponential(3)} vs CPU ${gate.tCPU.toExponential(3)})${gateOK?' <span class="ok">✓</span>':' <span class="warn">✗ MISMATCH</span>'}`}\n`
       : `f32 eps    ${(Math.hypot(...cam.pos)*5e-7).toExponential(2)}\n`)+
-    `power n    <b>${nPower}</b>   phase <b>${phaseTheta.toFixed(2)},${phasePhi.toFixed(2)}</b>   iters <b>${cam.iters}</b>   orbitLen ${curOrbit?curOrbit.len:'-'}   res ÷${deepActive?deepDiv:1}   normals <b>${['screen','3-tap','4-tap'][normalMode]}</b>`+
-    `   color <b>${['plain','iteration','orbit-trap'][colorMode]}</b>   detail <b>${surfMul.toFixed(2)}×</b>   light <b>${['directional','headlamp','both'][lightMode]}</b>`+
-    (deepActive&&accumEnabled?`   accum <b class="${accumN>=ACCUM_MAX?'ok':''}">${accumN>=ACCUM_MAX?`${accumN}× ✓`:accumN>0?`${accumN}×…`:'live ÷'+deepDiv}</b>`:'')+`\n`+
-    `pos        ${cam.pos.map(v=>v.toFixed(5)).join(', ')}`+
-    (recording?`   <b class="warn">● REC ${recPath.length}f</b>`:'');
+    `<span class="hud-dim">power n    <b>${nPower}</b>   phase <b>${phaseTheta.toFixed(2)},${phasePhi.toFixed(2)}</b>   iters <b>${cam.iters}</b>   orbitLen ${curOrbit?curOrbit.len:'-'}   frame <b>${w}×${h}</b>   normals <b>${['screen','3-tap','4-tap'][normalMode]}</b>`+
+    `   color <b>${['plain','iteration','orbit-trap'][colorMode]}</b>   detail <b>${surfMul.toFixed(2)}×</b>   light <b>${['directional','headlamp','both'][lightMode]}</b></span>`+
+    (deepActive&&accumEnabled?`   accum <b class="${accumN>=ACCUM_MAX?'ok':''}">${accumN>=ACCUM_MAX?`${accumN}× ✓`:accumN>0?`${accumN}×…`:'live '+w+'×'+h}</b>`:'')+`\n`+
+    `pos        <span class="hud-dim">${cam.pos.map(v=>v.toFixed(5)).join(', ')}</span>`+
+    (recording?`   <b class="warn">● REC ${recPath.length}f${(!isFlying()&&recPath.length<=1)?' — fly to lay keyframes':''}</b>`:playingPath?`   <b class="ok">▶ PREVIEW · ESC to stop</b>`:'');
   requestAnimationFrame(frame);
 }
 const hud=document.getElementById('hud');

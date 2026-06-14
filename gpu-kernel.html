@@ -65,12 +65,26 @@ vec2 hdrAdd(vec2 a, vec2 b) {
   }
 }
 vec2 hdrSub(vec2 a, vec2 b) { return hdrAdd(a, vec2(-b.x, b.y)); }
-vec2 hdrMul(vec2 a, vec2 b) { return hdrReduce(vec2(a.x * b.x, a.y + b.y)); }
+/* hdrMul fast path: both mantissas are normalized to |m| ∈ [1,2), so the product is in
+   [1,4) → at most one halving (never a multiply-up). Bit-exact with hdrReduce here but
+   without the log2/exp2. */
+vec2 hdrMul(vec2 a, vec2 b) {
+  float m = a.x * b.x; if (m == 0.0) return vec2(0.0, 0.0);
+  float e = a.y + b.y;
+  if (abs(m) >= 2.0) { m *= 0.5; e += 1.0; }
+  return vec2(m, e);
+}
 
 /* ──── NEW helpers (this prep; GPU-verified by runPrimsTest) ──── */
 vec2 hdrMulF(vec2 h, float s) { return hdrReduce(vec2(h.x * s, h.y)); }
 vec2 hdrDivF(vec2 h, float s) { return hdrReduce(vec2(h.x / s, h.y)); }
-vec2 hdrRecip(vec2 h) { if (h.x == 0.0) return vec2(0.0, 0.0); return hdrReduce(vec2(1.0 / h.x, -h.y)); }
+/* hdrRecip fast path: h.x ∈ [1,2) ⇒ 1/h.x ∈ (0.5,1] → at most one doubling. The test
+   MUST be abs(r)<1.0 (not r<1.0): a mantissa of exactly −1 has |1/h.x|=1 and must not double. */
+vec2 hdrRecip(vec2 h) {
+  if (h.x == 0.0) return vec2(0.0, 0.0);
+  float r = 1.0 / h.x;
+  return abs(r) < 1.0 ? vec2(r * 2.0, -h.y - 1.0) : vec2(r, -h.y);
+}
 
 /* (1+u)^8 − 1 = u·(8 + 28u + 56u² + 70u³ + 56u⁴ + 28u⁵ + 8u⁶ + u⁷)  — EXACT binomial
    factorization, cancellation-free for the deep regime (|u|≪1 → poly ≈ 8, all error
@@ -225,23 +239,27 @@ OrbitOut pertOrbit(sampler2D orbit, int orbitLen, Hdr3 dc, int maxIter) {
     d = h3Add(so.delta, dc);
     m++;
     it = k + 1;
-    RefIter rn = fetchRef(orbit, m);
+    /* only V (t0) and DR (t3) of the next ref are used here — fetch 2 texels, not 4 */
+    vec3 rnV = texelFetch(orbit, ivec2(m, 0), 0).xyz;
+    vec2 rnDR = texelFetch(orbit, ivec2(m, 3), 0).xy;
     vec3 df = h3ToVec3(d);                 // underflow → 0 at depth: both tests below stay correct
-    vec3 zf = rn.V + df;
-    if (dot(zf, zf) > 4.0) { escaped = true; break; }
-    if (dot(zf, zf) < dot(df, df) || m >= orbitLen - 1) {
-      d = h3FromVec3(zf - fetchRef(orbit, 0).V);
-      Ddr = hdrAdd(hdrSub(rn.DR, vec2(1.0, 0.0)), Ddr);
+    vec3 zf = rnV + df;
+    float zf2 = dot(zf, zf);
+    if (zf2 > 4.0) { escaped = true; break; }
+    if (zf2 < dot(df, df) || m >= orbitLen - 1) {
+      d = h3FromVec3(zf - texelFetch(orbit, ivec2(0, 0), 0).xyz);   // ref[0].V only (t0)
+      Ddr = hdrAdd(hdrSub(rnDR, vec2(1.0, 0.0)), Ddr);
       m = 0; rebases++;
     }
   }
   /* final Δr vs the CURRENT reference index, then r = R+Δr, dr = DR+Δdr,
      de = 0.5·r·ln(r)/dr  — dr stays HDR (it overflows f32), so de is HDR */
-  RefIter rf = fetchRef(orbit, m);
-  vec2 q = hdrAdd(hdrMulF(h3DotF(rf.V, d), 2.0), h3Dot(d, d));
-  float r2f = sqrt(max(rf.R * rf.R + hdrToFloat(q), 0.0));
-  vec2 Dr = hdrDivF(q, r2f + rf.R);
-  vec2 drH = hdrAdd(rf.DR, Ddr);
+  vec4 rf0 = texelFetch(orbit, ivec2(m, 0), 0);          // V (xyz) + R (w) — t0 only
+  vec2 rfDR = texelFetch(orbit, ivec2(m, 3), 0).xy;       // DR — t3 only
+  vec2 q = hdrAdd(hdrMulF(h3DotF(rf0.xyz, d), 2.0), h3Dot(d, d));
+  float r2f = sqrt(max(rf0.w * rf0.w + hdrToFloat(q), 0.0));
+  vec2 Dr = hdrDivF(q, r2f + rf0.w);
+  vec2 drH = hdrAdd(rfDR, Ddr);
   float rF = max(r2f, 1e-12);
   vec2 de = hdrMul(hdrFromFloat(0.5 * rF * log(rF)), hdrRecip(drH));
   return OrbitOut(d, Dr, Ddr, de, it, rebases, escaped);
